@@ -35,7 +35,7 @@ jobs:
         run: |
           set -e
 
-          # 1. Auto-extract any project zip files (safely handles filenames with spaces like 'MYZO EXTERNAL NEW.zip')
+          # 1. Auto-extract any project zip files (safely handles spaces in filenames)
           python3 -c "
           import zipfile, pathlib
           for p in pathlib.Path('.').glob('*.zip'):
@@ -60,7 +60,32 @@ jobs:
           APP_DIR=$(dirname "$MAIN_M")
           echo "Found App Source Directory: $APP_DIR"
 
-          # 3. Locate or download Filza IPA
+          # 3. Auto-fix syntax corruption on line 42 of main.m if present
+          python3 -c "
+          with open('$MAIN_M', 'r', encoding='utf-8', errors='ignore') as f:
+              lines = f.read().splitlines()
+          new_lines = []
+          skip_next = False
+          fixed = False
+          for idx, line in enumerate(lines):
+              if 'isEqualToString:]' in line:
+                  fixed = True
+                  if idx + 1 < len(lines) and lines[idx + 1].strip() == '}':
+                      skip_next = True
+                  continue
+              if skip_next and line.strip() == '}':
+                  skip_next = False
+                  continue
+              new_lines.append(line)
+          if fixed:
+              print('Successfully auto-patched syntax error in main.m!')
+              with open('$MAIN_M', 'w', encoding='utf-8') as f:
+                  f.write('\n'.join(new_lines) + '\n')
+          else:
+              print('main.m syntax check: Clean')
+          "
+
+          # 4. Locate or download Filza IPA
           mkdir -p inputs
           if [ -n "${{ github.event.inputs.filza_url }}" ]; then
             echo "Downloading FilzaSlop from URL..."
@@ -74,38 +99,38 @@ jobs:
           fi
           echo "Using Filza IPA: $FILZA_IPA"
 
-          # 4. Setup build folders
+          # 5. Setup build folders
           rm -rf .build release
           mkdir -p .build release .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework .build/Payload/fougoexternal.app/OfflineCache
 
-          # 5. Extract and patch Filza bridge dylib
+          # 6. Extract and patch Filza bridge dylib
           unzip -p "$FILZA_IPA" "Payload/Filza.app/Frameworks/FilzaApplySandboxExt.dylib" > .build/FilzaApplySandboxExt.dylib
           strip -S .build/FilzaApplySandboxExt.dylib 2>/dev/null || true
           install_name_tool -id "@rpath/CoreTelemetry.framework/CoreTelemetry" .build/FilzaApplySandboxExt.dylib
 
-          # 6. Harden with protect_bridge.py
+          # 7. Harden with protect_bridge.py
           python3 "$APP_DIR/protect_bridge.py" .build/FilzaApplySandboxExt.dylib .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/CoreTelemetry .build/protection_metadata.json
 
-          # 7. Generate ProtectedConfig.h
+          # 8. Generate ProtectedConfig.h
           python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
 
-          # 8. Compile with Apple Clang (iOS 15.0+ arm64)
+          # 9. Compile with Apple Clang (iOS 15.0+ arm64)
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "Using Apple SDK: $IOS_SDK"
 
           clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
           strip -x .build/Payload/fougoexternal.app/fougoexternal 2>/dev/null || true
 
-          # 9. Copy Plists and Background
+          # 10. Copy Plists and Background
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
           cp "$APP_DIR/FrameworkInfo.plist" .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/Info.plist
           BG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
           [ -n "$BG" ] && cp "$BG" .build/Payload/fougoexternal.app/RobotExternalBackground.jpg || true
 
-          # 10. Generate App Icons
+          # 11. Generate App Icons
           python3 -c "import zlib, struct, pathlib; p=pathlib.Path('.build/Payload/fougoexternal.app'); [p.joinpath(n).write_bytes(b'\x89PNG\r\n\x1a\n' + struct.pack('>IIBBBBB',w,h,8,6,0,0,0) + b'IHDR' + struct.pack('>I',zlib.crc32(b'IHDR'+struct.pack('>IIBBBBB',w,h,8,6,0,0,0))) + struct.pack('>I',len(zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + b'IDAT' + zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])) + struct.pack('>I',zlib.crc32(b'IDAT'+zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + struct.pack('>I',0) + b'IEND' + struct.pack('>I',zlib.crc32(b'IEND'))) for n,w,h in [('AppIcon60x60@2x.png',120,120),('AppIcon60x60@3x.png',180,180),('AppIcon76x76@2x~ipad.png',152,152),('AppIcon83.5x83.5@2x~ipad.png',167,167),('AppIcon60x60.png',60,60),('AppIcon76x76.png',76,76),('AppIcon83.5x83.5.png',84,84),('iTunesArtwork.png',512,512),('iTunesArtwork@2x.png',1024,1024)]]"
 
-          # 11. Copy Offline Cache Profiles (BODY & NECK)
+          # 12. Copy Offline Cache Profiles (BODY & NECK)
           for feat in BODY NECK; do
             PROF=$(find "$APP_DIR" -name "$feat.*" | head -n 1)
             if [ -n "$PROF" ]; then
@@ -114,7 +139,7 @@ jobs:
             fi
           done
 
-          # 12. Package IPA
+          # 13. Package IPA
           cd .build
           zip -qry9 "../release/RobotExternal-v100-Offline-Unsigned.ipa" Payload
           cd ..
