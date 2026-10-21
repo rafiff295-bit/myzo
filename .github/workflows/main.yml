@@ -64,7 +64,7 @@ jobs:
           APP_DIR=$(dirname "$MAIN_M")
           echo "Found App Source Directory: $APP_DIR"
 
-          # 3. Auto-fix brand check and define FFOwnerTelegram / FFBrandIdentityIsValid
+          # 3. Auto-fix brand check, Telegram owner, and gojoImage typo
           TELEGRAM_HANDLE="${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}"
           [ -z "$TELEGRAM_HANDLE" ] && TELEGRAM_HANDLE="@MYZO_PANEL"
           export TELEGRAM_HANDLE
@@ -88,9 +88,13 @@ jobs:
               code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
               print('[✓] Injected FFBrandIdentityIsValid() -> YES')
 
+          if 'gojoImage' in code:
+              code = code.replace('gojoImage', 'fougoImage')
+              print('[✓] Fixed undeclared identifier: replaced gojoImage with fougoImage!')
+
           with open('$MAIN_M', 'w', encoding='utf-8') as f:
               f.write(code)
-          print('[✓] Brand identity and owner check patch applied successfully!')
+          print('[✓] main.m brand identity, owner check, and variables patched!')
           "
 
           # 4. Locate or download Filza IPA
@@ -133,7 +137,12 @@ jobs:
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
           cp "$APP_DIR/FrameworkInfo.plist" .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/Info.plist
           BG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
-          [ -n "$BG" ] && cp "$BG" .build/Payload/fougoexternal.app/RobotExternalBackground.jpg || true
+          if [ -n "$BG" ]; then
+            cp "$BG" .build/Payload/fougoexternal.app/RobotExternalBackground.jpg || true
+            cp "$BG" .build/Payload/fougoexternal.app/MyzoExternalBackground.jpg || true
+            cp "$BG" .build/Payload/fougoexternal.app/fougoExternalBackground.jpg || true
+            cp "$BG" .build/Payload/fougoexternal.app/Myzoexternel.jpg || true
+          fi
 
           # 11. Generate App Icons
           python3 -c "import zlib, struct, pathlib; p=pathlib.Path('.build/Payload/fougoexternal.app'); [p.joinpath(n).write_bytes(b'\x89PNG\r\n\x1a\n' + struct.pack('>IIBBBBB',w,h,8,6,0,0,0) + b'IHDR' + struct.pack('>I',zlib.crc32(b'IHDR'+struct.pack('>IIBBBBB',w,h,8,6,0,0,0))) + struct.pack('>I',len(zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + b'IDAT' + zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])) + struct.pack('>I',zlib.crc32(b'IDAT'+zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + struct.pack('>I',0) + b'IEND' + struct.pack('>I',zlib.crc32(b'IEND'))) for n,w,h in [('AppIcon60x60@2x.png',120,120),('AppIcon60x60@3x.png',180,180),('AppIcon76x76@2x~ipad.png',152,152),('AppIcon83.5x83.5@2x~ipad.png',167,167),('AppIcon60x60.png',60,60),('AppIcon76x76.png',76,76),('AppIcon83.5x83.5.png',84,84),('iTunesArtwork.png',512,512),('iTunesArtwork@2x.png',1024,1024)]]"
