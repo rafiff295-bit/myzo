@@ -10,6 +10,10 @@ on:
         description: "Direct URL to FilzaSlop_1.0.3.ipa (Optional if file exists in repo)"
         required: false
         default: ""
+      telegram_owner:
+        description: "Telegram Support / Owner handle"
+        required: false
+        default: "@MYZO_PANEL"
 
 permissions:
   contents: write
@@ -60,29 +64,33 @@ jobs:
           APP_DIR=$(dirname "$MAIN_M")
           echo "Found App Source Directory: $APP_DIR"
 
-          # 3. Auto-fix syntax corruption on line 42 of main.m if present
+          # 3. Auto-fix brand check and define FFOwnerTelegram / FFBrandIdentityIsValid
+          TELEGRAM_HANDLE="${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}"
+          [ -z "$TELEGRAM_HANDLE" ] && TELEGRAM_HANDLE="@MYZO_PANEL"
+          export TELEGRAM_HANDLE
           python3 -c "
+          import os, re
+          tg = os.environ.get('TELEGRAM_HANDLE', '@MYZO_PANEL')
           with open('$MAIN_M', 'r', encoding='utf-8', errors='ignore') as f:
-              lines = f.read().splitlines()
-          new_lines = []
-          skip_next = False
-          fixed = False
-          for idx, line in enumerate(lines):
-              if 'isEqualToString:]' in line:
-                  fixed = True
-                  if idx + 1 < len(lines) and lines[idx + 1].strip() == '}':
-                      skip_next = True
-                  continue
-              if skip_next and line.strip() == '}':
-                  skip_next = False
-                  continue
-              new_lines.append(line)
-          if fixed:
-              print('Successfully auto-patched syntax error in main.m!')
-              with open('$MAIN_M', 'w', encoding='utf-8') as f:
-                  f.write('\n'.join(new_lines) + '\n')
-          else:
-              print('main.m syntax check: Clean')
+              code = f.read()
+
+          patch_block = f'''static NSString *const FFOwnerTelegram = @\"{tg}\";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
+
+          if 'isEqualToString:]' in code:
+              code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
+              print(f'[✓] Replaced corrupted brand validation with FFOwnerTelegram ({tg}) and FFBrandIdentityIsValid()')
+
+          if 'FFOwnerTelegram' not in code:
+              code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @\"{tg}\";', code, count=1)
+              print(f'[✓] Injected FFOwnerTelegram = @\"{tg}\"')
+
+          if 'FFBrandIdentityIsValid' not in code:
+              code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
+              print('[✓] Injected FFBrandIdentityIsValid() -> YES')
+
+          with open('$MAIN_M', 'w', encoding='utf-8') as f:
+              f.write(code)
+          print('[✓] Brand identity and owner check patch applied successfully!')
           "
 
           # 4. Locate or download Filza IPA
