@@ -11,11 +11,11 @@ on:
         required: false
         default: ""
       app_version:
-        description: "App Version String"
+        description: "App Version String (e.g. 1.0)"
         required: false
         default: "1.0"
       app_build:
-        description: "App Build Number"
+        description: "App Build Number (e.g. 1)"
         required: false
         default: "1"
 
@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Dependencies
+      - name: Install Python Dependencies (LIEF & Pillow)
         run: |
           python -m pip install --upgrade pip
           python -m pip install lief pillow
@@ -52,11 +52,206 @@ jobs:
           if [ ! -f "inputs/FilzaSlop_1.0.3.ipa" ]; then
             ANY_IPA=$(find . -maxdepth 3 -name "*Filza*.ipa" -o -name "*filza*.ipa" | head -n 1)
             if [ -n "$ANY_IPA" ]; then
+              echo "Found matching IPA: $ANY_IPA"
               cp "$ANY_IPA" "inputs/FilzaSlop_1.0.3.ipa"
             else
-              echo "::error::FilzaSlop_1.0.3.ipa not found in inputs/ folder!"
+              echo "::error::FilzaSlop_1.0.3.ipa is not present in inputs/. Please upload it to inputs/FilzaSlop_1.0.3.ipa or provide filza_url."
               exit 1
             fi
+          fi
+
+      - name: Ensure Build Script Exists (Self-Healing)
+        run: |
+          if [ ! -f "build.sh" ]; then
+            echo "⚠️ build.sh not found in root. Generating automated build.sh on the fly..."
+            cat << 'SH_EOF' > build.sh
+#!/usr/bin/env bash
+set -e
+
+OFFLINE=1
+OUTPUT_DIR="${OUTPUT_DIR:-release}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -d "$ROOT_DIR/app/ff_manager" ]; then
+    APP_DIR="$ROOT_DIR/app/ff_manager"
+elif [ -d "$ROOT_DIR/MYZO-EXTERNAL-SOURCE/app/ff_manager" ]; then
+    APP_DIR="$ROOT_DIR/MYZO-EXTERNAL-SOURCE/app/ff_manager"
+else
+    MAIN_M=$(find "$ROOT_DIR" -name "main.m" | head -n 1)
+    if [ -n "$MAIN_M" ]; then
+        APP_DIR="$(dirname "$MAIN_M")"
+    else
+        APP_DIR="$ROOT_DIR"
+    fi
+fi
+
+INPUTS_DIR="${INPUTS_DIR:-$ROOT_DIR/inputs}"
+BUILD_DIR="$ROOT_DIR/.build"
+IPA_BASE_NAME="RobotExternal-v100-Offline-Unsigned.ipa"
+APP_PAYLOAD="$BUILD_DIR/Payload/fougoexternal.app"
+FRAMEWORK_BUNDLE="$APP_PAYLOAD/Frameworks/CoreTelemetry.framework"
+
+echo "=========================================================="
+echo "  MYZO EXTERNAL iOS IPA BUILDER (GitHub Actions / macOS)"
+echo "=========================================================="
+echo "App directory: $APP_DIR"
+
+FILZA_IPA="${FILZA_IPA:-}"
+if [ -z "$FILZA_IPA" ]; then
+    for candidate in \
+        "$INPUTS_DIR/FilzaSlop_1.0.3.ipa" \
+        "$ROOT_DIR/FilzaSlop_1.0.3.ipa" \
+        "$APP_DIR/FilzaSlop_1.0.3.ipa" \
+        "$INPUTS_DIR"/*.ipa \
+        "$ROOT_DIR"/*.ipa; do
+        if [ -f "$candidate" ]; then
+            FILZA_IPA="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$FILZA_IPA" ] || [ ! -f "$FILZA_IPA" ]; then
+    echo "::error::FilzaSlop_1.0.3.ipa not found! Place it in inputs/ or pass filza_url."
+    exit 1
+fi
+echo "[✓] Using Filza IPA: $FILZA_IPA"
+
+rm -rf "$BUILD_DIR" "$OUTPUT_DIR"
+mkdir -p "$BUILD_DIR" "$OUTPUT_DIR" "$FRAMEWORK_BUNDLE" "$APP_PAYLOAD/OfflineCache"
+
+echo "[1/8] Extracting Filza sandbox bridge..."
+unzip -p "$FILZA_IPA" "Payload/Filza.app/Frameworks/FilzaApplySandboxExt.dylib" > "$BUILD_DIR/FilzaApplySandboxExt.dylib"
+if [ ! -s "$BUILD_DIR/FilzaApplySandboxExt.dylib" ]; then
+    echo "::error::Failed to extract FilzaApplySandboxExt.dylib from $FILZA_IPA"
+    exit 1
+fi
+
+echo "[2/8] Setting install name and stripping debug symbols..."
+strip -S "$BUILD_DIR/FilzaApplySandboxExt.dylib" 2>/dev/null || true
+install_name_tool -id "@rpath/CoreTelemetry.framework/CoreTelemetry" "$BUILD_DIR/FilzaApplySandboxExt.dylib"
+
+echo "[3/8] Hardening sandbox bridge with LIEF..."
+python3 "$APP_DIR/protect_bridge.py" "$BUILD_DIR/FilzaApplySandboxExt.dylib" "$FRAMEWORK_BUNDLE/CoreTelemetry" "$BUILD_DIR/protection_metadata.json"
+rm -f "$BUILD_DIR/FilzaApplySandboxExt.dylib"
+
+echo "[4/8] Generating ProtectedConfig.h with binary hashes..."
+python3 -c "
+import json
+with open('$BUILD_DIR/protection_metadata.json') as f:
+    data = json.load(f)
+slices = data['slices']
+config = f'''#ifndef ProtectedConfig_h
+#define ProtectedConfig_h
+#define FMCORE_TEXT_SHA256_A @\"{slices[0]['text_sha256']}\"
+#define FMCORE_EXPORT_SHA256_A @\"{slices[0]['export_sha256']}\"
+#define FMCORE_SECTION_SHA256_A @\"{slices[0]['section_sha256']}\"
+#define FMCORE_TEXT_SHA256_B @\"{slices[1]['text_sha256']}\"
+#define FMCORE_EXPORT_SHA256_B @\"{slices[1]['export_sha256']}\"
+#define FMCORE_SECTION_SHA256_B @\"{slices[1]['section_sha256']}\"
+#endif
+'''
+with open('$BUILD_DIR/ProtectedConfig.h', 'w') as f:
+    f.write(config)
+"
+
+IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+echo "[✓] Using Apple SDK: $IOS_SDK"
+
+echo "[5/8] Compiling main.m for iOS arm64..."
+clang -arch arm64 \
+    -target arm64-apple-ios15.0 \
+    -isysroot "$IOS_SDK" \
+    -fobjc-arc -Os -fstack-protector-strong \
+    -fvisibility=hidden -fomit-frame-pointer -fno-ident \
+    -Wno-deprecated-declarations \
+    -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 \
+    -I"$BUILD_DIR" \
+    "$APP_DIR/main.m" \
+    -framework UIKit -framework Foundation -framework CoreGraphics \
+    -framework QuartzCore -framework Security -framework UniformTypeIdentifiers \
+    -lobjc -lSystem \
+    -dead_strip \
+    -Xlinker -adhoc_codesign \
+    -o "$APP_PAYLOAD/fougoexternal"
+
+strip -x "$APP_PAYLOAD/fougoexternal" 2>/dev/null || true
+
+echo "[6/8] Assembling app bundle resources..."
+cp "$APP_DIR/Info.plist" "$APP_PAYLOAD/Info.plist"
+cp "$APP_DIR/FrameworkInfo.plist" "$FRAMEWORK_BUNDLE/Info.plist"
+
+BG_IMG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
+if [ -n "$BG_IMG" ] && [ -f "$BG_IMG" ]; then
+    cp "$BG_IMG" "$APP_PAYLOAD/RobotExternalBackground.jpg"
+fi
+
+APP_VERSION="${APP_VERSION:-1.0}"
+APP_BUILD="${APP_BUILD:-1}"
+if [ -f "$APP_DIR/update_plist_version.py" ]; then
+    python3 "$APP_DIR/update_plist_version.py" "$APP_PAYLOAD/Info.plist" "$APP_VERSION" "$APP_BUILD"
+fi
+
+python3 -c "
+import zlib, struct
+from pathlib import Path
+app_dir = Path('$APP_PAYLOAD')
+icon_sizes = [
+    ('AppIcon60x60@2x.png', 120, 120),
+    ('AppIcon60x60@3x.png', 180, 180),
+    ('AppIcon76x76@2x~ipad.png', 152, 152),
+    ('AppIcon83.5x83.5@2x~ipad.png', 167, 167),
+    ('AppIcon60x60.png', 60, 60),
+    ('AppIcon76x76.png', 76, 76),
+    ('AppIcon83.5x83.5.png', 84, 84),
+    ('iTunesArtwork.png', 512, 512),
+    ('iTunesArtwork@2x.png', 1024, 1024),
+]
+def create_png(w, h):
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)
+        for x in range(w):
+            if x < 4 or x >= w-4 or y < 4 or y >= h-4:
+                raw.extend([0, 200, 255, 255])
+            else:
+                raw.extend([15, 23, 42, 255])
+    comp = zlib.compress(bytes(raw))
+    png = bytearray(b'\x89PNG\r\n\x1a\n')
+    ihdr = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)
+    png.extend(struct.pack('>I', len(ihdr)) + b'IHDR' + ihdr + struct.pack('>I', zlib.crc32(b'IHDR' + ihdr)))
+    png.extend(struct.pack('>I', len(comp)) + b'IDAT' + comp + struct.pack('>I', zlib.crc32(b'IDAT' + comp)))
+    png.extend(struct.pack('>I', 0) + b'IEND' + struct.pack('>I', zlib.crc32(b'IEND')))
+    return bytes(png)
+
+for name, w, h in icon_sizes:
+    (app_dir / name).write_bytes(create_png(w, h))
+print('Generated launcher icons.')
+"
+
+echo "[7/8] Installing offline profile payloads (BODY & NECK)..."
+for feat in BODY NECK; do
+    profile_src=$(find "$APP_DIR" -name "$feat.*" | head -n 1)
+    if [ -n "$profile_src" ] && [ -f "$profile_src" ]; then
+        cp "$profile_src" "$APP_PAYLOAD/OfflineCache/$feat.fougoexternal"
+        cp "$profile_src" "$APP_PAYLOAD/$feat.fougoexternal"
+        echo "  [✓] Installed $feat profile"
+    fi
+done
+
+echo "[8/8] Packaging IPA archive..."
+cd "$BUILD_DIR"
+zip -qry9 "$ROOT_DIR/$OUTPUT_DIR/$IPA_BASE_NAME" "Payload"
+cd "$ROOT_DIR"
+
+shasum -a 256 "$OUTPUT_DIR/$IPA_BASE_NAME" > "$OUTPUT_DIR/$IPA_BASE_NAME.sha256"
+
+echo "=========================================================="
+echo "  BUILD COMPLETE: $OUTPUT_DIR/$IPA_BASE_NAME"
+echo "  SHA256: $(cat "$OUTPUT_DIR/$IPA_BASE_NAME.sha256" | awk '{print $1}')"
+echo "=========================================================="
+SH_EOF
+            chmod +x build.sh
           fi
 
       - name: Compile and Package IPA
