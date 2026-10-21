@@ -1,0 +1,41 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: [self-hosted, windows, x64, ios-build]
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Check build dependencies and prepare assets
+        shell: pwsh
+        run: |
+          <LaTex>ErrorActionPreference = "Stop"</LaTex>sdk = "C:\ios-build-deps\iPhoneOS.sdk"
+          <LaTex>filza = "C:\ios-build-deps\FilzaSlop_1.0.3.ipa"            if (-not (Test-Path</LaTex>sdk)) {
+            throw "Missing iOS SDK: <LaTex>sdk"           }           if (-not (Test-Path</LaTex>filza)) {
+            throw "Missing input IPA: <LaTex>filza"           }</LaTex>appRoot = Join-Path <LaTex>env:GITHUB_WORKSPACE "app\ff_manager"</LaTex>expectedImage = Join-Path <LaTex>appRoot "RobotExternalBackground.jpg"</LaTex>providedImage = Join-Path <LaTex>appRoot "Myzoexternel.jpg"            # Compatibility copy, if this is the intended background image.           if (-not (Test-Path</LaTex>expectedImage) -and (Test-Path <LaTex>providedImage)) {             Copy-Item</LaTex>providedImage <LaTex>expectedImage           }           if (-not (Test-Path</LaTex>expectedImage)) {
+            throw "Missing expected image: <LaTex>expectedImage"           }        - name: Build unsigned IPA         shell: pwsh         run: |</LaTex>ErrorActionPreference = "Stop"
+
+          & ".\BUILD-WINDOWS.ps1" `
+            -FilzaIpa "C:\ios-build-deps\FilzaSlop_1.0.3.ipa" `
+            -IosSdk "C:\ios-build-deps\iPhoneOS.sdk" `
+            -OutputDirectory "<LaTex>env:GITHUB_WORKSPACE\release"            if (</LaTex>LASTEXITCODE -ne 0) {
+            throw "Build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Upload IPA and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ipa
+          path: |
+            release/*.ipa
+            release/*.sha256
+          if-no-files-found: error
