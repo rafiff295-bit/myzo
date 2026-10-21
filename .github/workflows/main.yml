@@ -34,48 +34,79 @@ jobs:
       - name: Compile and Package IPA
         run: |
           set -e
+
+          # 1. Auto-discover main.m or extract any zip archives in repository
           MAIN_M=$(find . -name "main.m" | head -n 1)
+
           if [ -z "$MAIN_M" ]; then
-            echo "Error: main.m not found!"
+            echo "main.m not found directly. Checking for project zip files..."
+            for zipfile in $(find . -maxdepth 3 -name "*.zip"); do
+              if [[ "$zipfile" != *"Filza"* ]] && [[ "$zipfile" != *"filza"* ]]; then
+                echo "Found zip file: $zipfile. Auto-extracting..."
+                unzip -q -o "$zipfile" -d . || true
+              fi
+            done
+            MAIN_M=$(find . -name "main.m" | head -n 1)
+          fi
+
+          if [ -z "$MAIN_M" ]; then
+            echo "::error::main.m not found in the repository!"
+            echo "================ REPOSITORY CONTENTS ================"
+            find . -maxdepth 3 -not -path '*/.*'
+            echo "====================================================="
+            echo "Please upload your source code (app folder or the MYZO zip file) to this repository!"
             exit 1
           fi
-          APP_DIR=$(dirname "$MAIN_M")
-          echo "Found APP_DIR: $APP_DIR"
 
+          APP_DIR=$(dirname "$MAIN_M")
+          echo "Found App Source Directory: $APP_DIR"
+
+          # 2. Locate or download Filza IPA
           mkdir -p inputs
           if [ -n "${{ github.event.inputs.filza_url }}" ]; then
+            echo "Downloading FilzaSlop from URL..."
             curl -fL -o "inputs/FilzaSlop_1.0.3.ipa" "${{ github.event.inputs.filza_url }}"
           fi
 
-          FILZA_IPA=$(find . -maxdepth 3 -name "*Filza*.ipa" -o -name "*filza*.ipa" | head -n 1)
+          FILZA_IPA=$(find . -maxdepth 4 -name "*Filza*.ipa" -o -name "*filza*.ipa" | head -n 1)
           if [ -z "$FILZA_IPA" ]; then
-            echo "Filza IPA not found! Please upload FilzaSlop_1.0.3.ipa in inputs/ or provide URL"
+            echo "::error::Filza IPA not found! Please place FilzaSlop_1.0.3.ipa in inputs/ folder or provide filza_url."
             exit 1
           fi
           echo "Using Filza IPA: $FILZA_IPA"
 
+          # 3. Setup build folders
           rm -rf .build release
           mkdir -p .build release .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework .build/Payload/fougoexternal.app/OfflineCache
 
+          # 4. Extract and patch Filza bridge dylib
           unzip -p "$FILZA_IPA" "Payload/Filza.app/Frameworks/FilzaApplySandboxExt.dylib" > .build/FilzaApplySandboxExt.dylib
           strip -S .build/FilzaApplySandboxExt.dylib 2>/dev/null || true
           install_name_tool -id "@rpath/CoreTelemetry.framework/CoreTelemetry" .build/FilzaApplySandboxExt.dylib
 
+          # 5. Harden with protect_bridge.py
           python3 "$APP_DIR/protect_bridge.py" .build/FilzaApplySandboxExt.dylib .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/CoreTelemetry .build/protection_metadata.json
 
+          # 6. Generate ProtectedConfig.h
           python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
 
+          # 7. Compile with Apple Clang (iOS 15.0+ arm64)
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "Using Apple SDK: $IOS_SDK"
+
           clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
           strip -x .build/Payload/fougoexternal.app/fougoexternal 2>/dev/null || true
 
+          # 8. Copy Plists and Background
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
           cp "$APP_DIR/FrameworkInfo.plist" .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/Info.plist
           BG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
           [ -n "$BG" ] && cp "$BG" .build/Payload/fougoexternal.app/RobotExternalBackground.jpg || true
 
+          # 9. Generate App Icons
           python3 -c "import zlib, struct, pathlib; p=pathlib.Path('.build/Payload/fougoexternal.app'); [p.joinpath(n).write_bytes(b'\x89PNG\r\n\x1a\n' + struct.pack('>IIBBBBB',w,h,8,6,0,0,0) + b'IHDR' + struct.pack('>I',zlib.crc32(b'IHDR'+struct.pack('>IIBBBBB',w,h,8,6,0,0,0))) + struct.pack('>I',len(zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + b'IDAT' + zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])) + struct.pack('>I',zlib.crc32(b'IDAT'+zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + struct.pack('>I',0) + b'IEND' + struct.pack('>I',zlib.crc32(b'IEND'))) for n,w,h in [('AppIcon60x60@2x.png',120,120),('AppIcon60x60@3x.png',180,180),('AppIcon76x76@2x~ipad.png',152,152),('AppIcon83.5x83.5@2x~ipad.png',167,167),('AppIcon60x60.png',60,60),('AppIcon76x76.png',76,76),('AppIcon83.5x83.5.png',84,84),('iTunesArtwork.png',512,512),('iTunesArtwork@2x.png',1024,1024)]]"
 
+          # 10. Copy Offline Cache Profiles (BODY & NECK)
           for feat in BODY NECK; do
             PROF=$(find "$APP_DIR" -name "$feat.*" | head -n 1)
             if [ -n "$PROF" ]; then
@@ -84,11 +115,14 @@ jobs:
             fi
           done
 
+          # 11. Package IPA
           cd .build
           zip -qry9 "../release/RobotExternal-v100-Offline-Unsigned.ipa" Payload
           cd ..
           shasum -a 256 release/RobotExternal-v100-Offline-Unsigned.ipa > release/RobotExternal-v100-Offline-Unsigned.ipa.sha256
-          echo "BUILD COMPLETED SUCCESSFULLY!"
+          echo "=========================================================="
+          echo "  BUILD COMPLETED SUCCESSFULLY!"
+          echo "=========================================================="
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
