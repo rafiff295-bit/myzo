@@ -14,6 +14,10 @@ on:
         description: "Telegram Support / Owner handle"
         required: false
         default: "@MYZO_PANEL"
+      icon_url:
+        description: "Direct URL to custom App Icon (PNG/JPEG) - Optional"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -39,7 +43,7 @@ jobs:
         run: |
           set -e
 
-          # 1. Auto-extract any project zip files (safely handles spaces in filenames)
+          # 1. Auto-extract any project zip files
           python3 -c "
           import zipfile, pathlib
           for p in pathlib.Path('.').glob('*.zip'):
@@ -64,7 +68,7 @@ jobs:
           APP_DIR=$(dirname "$MAIN_M")
           echo "Found App Source Directory: $APP_DIR"
 
-          # 3. Auto-fix brand check, Telegram owner, and gojoImage typo
+          # 3. Auto-fix brand check, Telegram owner, and inject Instant Autoplay Video Banner
           TELEGRAM_HANDLE="${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}"
           [ -z "$TELEGRAM_HANDLE" ] && TELEGRAM_HANDLE="@MYZO_PANEL"
           export TELEGRAM_HANDLE
@@ -90,11 +94,109 @@ jobs:
 
           if 'gojoImage' in code:
               code = code.replace('gojoImage', 'fougoImage')
-              print('[✓] Fixed undeclared identifier: replaced gojoImage with fougoImage!')
+              print('[✓] Fixed typo: replaced undeclared gojoImage with fougoImage!')
+
+          # Instant Autoplay Video Banner Injection
+          banner_class = '''
+#import <AVFoundation/AVFoundation.h>
+#import <AVKit/AVKit.h>
+
+@interface FFVideoBannerView : UIView
+@property (nonatomic, strong) AVQueuePlayer *player;
+@property (nonatomic, strong) AVPlayerLooper *looper;
+@property (nonatomic, strong) AVPlayerLayer *playerLayer;
+@end
+
+@implementation FFVideoBannerView
+- (instancetype)initWithVideoURL:(NSURL *)url {
+    self = [super initWithFrame:CGRectZero];
+    if (self) {
+        self.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.11 alpha:0.95];
+        self.layer.cornerRadius = 18;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.clipsToBounds = YES;
+        self.layer.borderWidth = 1.5;
+        self.layer.borderColor = [UIColor colorWithRed:0.92 green:0.75 blue:0.25 alpha:0.85].CGColor;
+
+        if (url) {
+            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
+            self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
+            self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
+            self.player.muted = YES;
+            self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
+            self.player.automaticallyWaitsToMinimizeStalling = NO;
+
+            self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
+            self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
+            [self.layer addSublayer:self.playerLayer];
+            [self.player playImmediatelyAtRate:1.0];
+
+            [[NSNotificationCenter defaultCenter] addObserver:self
+                                                     selector:@selector(handleAppForeground)
+                                                         name:UIApplicationDidBecomeActiveNotification
+                                                       object:nil];
+        }
+    }
+    return self;
+}
+
+- (void)handleAppForeground {
+    if (self.player) {
+        [self.player playImmediatelyAtRate:1.0];
+    }
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window && self.player) {
+        [self.player playImmediatelyAtRate:1.0];
+    }
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.playerLayer.frame = self.bounds;
+}
+@end
+'''
+          banner_helper = '''
+- (UIView *)videoBannerCard {
+    NSURL *videoURL = [[NSBundle mainBundle] URLForResource:@"banner" withExtension:@"mp4"];
+    if (!videoURL) {
+        videoURL = [[NSBundle mainBundle] URLForResource:@"banner" withExtension:@"mov"];
+    }
+    if (!videoURL) {
+        NSArray *allMP4 = [[NSBundle mainBundle] pathsForResourcesOfType:@"mp4" inDirectory:nil];
+        if (allMP4.count) videoURL = [NSURL fileURLWithPath:allMP4.firstObject];
+    }
+    if (!videoURL) return nil;
+
+    FFVideoBannerView *banner = [[FFVideoBannerView alloc] initWithVideoURL:videoURL];
+    banner.translatesAutoresizingMaskIntoConstraints = NO;
+    [banner.heightAnchor constraintEqualToConstant:175].active = YES;
+    return banner;
+}
+'''
+          if '#import <AVFoundation/AVFoundation.h>' not in code:
+              code = banner_class + '\n' + code
+
+          if '- (UIView *)videoBannerCard' not in code:
+              target = '- (void)buildControlContent {'
+              code = code.replace(target, banner_helper + '\n' + target)
+
+          card_inject = '''
+    UIView *bannerCard = [self videoBannerCard];
+    if (bannerCard) {
+        [_rootStack addArrangedSubview:bannerCard];
+    }
+    UIStackView *gameInfo = [UIStackView new];'''
+
+          if 'bannerCard' not in code:
+              code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
 
           with open('$MAIN_M', 'w', encoding='utf-8') as f:
               f.write(code)
-          print('[✓] main.m brand identity, owner check, and variables patched!')
+          print('[✓] main.m brand identity, owner check, variables, and instant autoplay video patched!')
           "
 
           # 4. Locate or download Filza IPA
@@ -126,14 +228,14 @@ jobs:
           # 8. Generate ProtectedConfig.h
           python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
 
-          # 9. Compile with Apple Clang (iOS 15.0+ arm64)
+          # 9. Compile with Apple Clang (iOS 15.0+ arm64) including AVFoundation and AVKit
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "Using Apple SDK: $IOS_SDK"
 
-          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
+          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
           strip -x .build/Payload/fougoexternal.app/fougoexternal 2>/dev/null || true
 
-          # 10. Copy Plists and Background
+          # 10. Copy Plists, Background, and Video Banner
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
           cp "$APP_DIR/FrameworkInfo.plist" .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/Info.plist
           BG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
@@ -144,8 +246,67 @@ jobs:
             cp "$BG" .build/Payload/fougoexternal.app/Myzoexternel.jpg || true
           fi
 
-          # 11. Generate App Icons
-          python3 -c "import zlib, struct, pathlib; p=pathlib.Path('.build/Payload/fougoexternal.app'); [p.joinpath(n).write_bytes(b'\x89PNG\r\n\x1a\n' + struct.pack('>IIBBBBB',w,h,8,6,0,0,0) + b'IHDR' + struct.pack('>I',zlib.crc32(b'IHDR'+struct.pack('>IIBBBBB',w,h,8,6,0,0,0))) + struct.pack('>I',len(zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + b'IDAT' + zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])) + struct.pack('>I',zlib.crc32(b'IDAT'+zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + struct.pack('>I',0) + b'IEND' + struct.pack('>I',zlib.crc32(b'IEND'))) for n,w,h in [('AppIcon60x60@2x.png',120,120),('AppIcon60x60@3x.png',180,180),('AppIcon76x76@2x~ipad.png',152,152),('AppIcon83.5x83.5@2x~ipad.png',167,167),('AppIcon60x60.png',60,60),('AppIcon76x76.png',76,76),('AppIcon83.5x83.5.png',84,84),('iTunesArtwork.png',512,512),('iTunesArtwork@2x.png',1024,1024)]]"
+          # Search and bundle video banner (mp4 or mov)
+          VID=$(find . -maxdepth 3 -name "*banner*.mp4" -o -name "*.mov" -o -name "*tiktok*.mov" -o -name "*banner*.mov" | head -n 1)
+          if [ -n "$VID" ]; then
+            echo "[✓] Bundling video banner: $VID"
+            cp "$VID" .build/Payload/fougoexternal.app/banner.mp4 || true
+            cp "$VID" .build/Payload/fougoexternal.app/banner.mov || true
+          fi
+
+          # 11. Generate App Icons (Auto-detects custom icon image in repo or uses Pillow to generate all iOS resolutions)
+          if [ -n "${{ github.event.inputs.icon_url }}" ]; then
+            echo "Downloading custom icon from URL..."
+            curl -fL -o "icon.png" "${{ github.event.inputs.icon_url }}" || true
+          fi
+
+          python3 -c "
+          import os, glob
+          from pathlib import Path
+          from PIL import Image
+
+          target_dir = Path('.build/Payload/fougoexternal.app')
+          target_dir.mkdir(parents=True, exist_ok=True)
+          sizes = [
+              ('AppIcon60x60@2x.png', 120, 120),
+              ('AppIcon60x60@3x.png', 180, 180),
+              ('AppIcon76x76@2x~ipad.png', 152, 152),
+              ('AppIcon83.5x83.5@2x~ipad.png', 167, 167),
+              ('AppIcon60x60.png', 60, 60),
+              ('AppIcon76x76.png', 76, 76),
+              ('AppIcon83.5x83.5.png', 84, 84),
+              ('iTunesArtwork.png', 512, 512),
+              ('iTunesArtwork@2x.png', 1024, 1024)
+          ]
+
+          icon_source = None
+          patterns = ['*icon*.png', '*icon*.jpeg', '*icon*.jpg', '*logo*.png', '*logo*.jpeg', '*logo*.jpg', 'IMG_*.jpeg', 'IMG_*.jpg', 'IMG_*.png', '*.png', '*.jpg', '*.jpeg']
+          for pattern in patterns:
+              for candidate in glob.glob(pattern):
+                  low = candidate.lower()
+                  if 'background' not in low and 'filza' not in low and 'banner' not in low:
+                      icon_source = candidate
+                      break
+              if icon_source:
+                  break
+
+          if icon_source and os.path.exists(icon_source):
+              print(f'[✓] Found custom app icon file: {icon_source}')
+              try:
+                  with Image.open(icon_source) as img:
+                      img = img.convert('RGBA')
+                      for name, w, h in sizes:
+                          resized = img.resize((w, h), Image.Resampling.LANCZOS)
+                          resized.save(target_dir / name, format='PNG')
+                  print('[✓] Successfully generated all 9 iOS icon resolutions from ' + icon_source)
+              except Exception as e:
+                  print(f'Warning generating icons from {icon_source}: {e}')
+          else:
+              print('[!] No custom icon file found in repo root; generating fallback icons...')
+              import zlib, struct
+              for n, w, h in sizes:
+                  target_dir.joinpath(n).write_bytes(b'\x89PNG\r\n\x1a\n' + struct.pack('>IIBBBBB',w,h,8,6,0,0,0) + b'IHDR' + struct.pack('>I',zlib.crc32(b'IHDR'+struct.pack('>IIBBBBB',w,h,8,6,0,0,0))) + struct.pack('>I',len(zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + b'IDAT' + zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])) + struct.pack('>I',zlib.crc32(b'IDAT'+zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + struct.pack('>I',0) + b'IEND' + struct.pack('>I',zlib.crc32(b'IEND')))
+          "
 
           # 12. Copy Offline Cache Profiles (BODY & NECK)
           for feat in BODY NECK; do
@@ -162,7 +323,7 @@ jobs:
           cd ..
           shasum -a 256 release/RobotExternal-v100-Offline-Unsigned.ipa > release/RobotExternal-v100-Offline-Unsigned.ipa.sha256
           echo "=========================================================="
-          echo "  BUILD COMPLETED SUCCESSFULLY!"
+          echo "  BUILD COMPLETED SUCCESSFULLY WITH INSTANT VIDEO BANNER!"
           echo "=========================================================="
 
       - name: Upload IPA Artifact
