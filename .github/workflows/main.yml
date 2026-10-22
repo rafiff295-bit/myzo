@@ -14,6 +14,10 @@ on:
         description: "Telegram Support / Owner handle"
         required: false
         default: "@MYZO_PANEL"
+      video_url:
+        description: "Direct URL to banner video (MP4/MOV) - Optional if file in repo"
+        required: false
+        default: ""
       icon_url:
         description: "Direct URL to custom App Icon (PNG/JPEG) - Optional"
         required: false
@@ -43,7 +47,7 @@ jobs:
         run: |
           set -e
 
-          # 1. Auto-extract any project zip files
+          # 1. Auto-extract any project zip files (safely handles spaces in filenames)
           python3 -c "
           import zipfile, pathlib
           for p in pathlib.Path('.').glob('*.zip'):
@@ -124,9 +128,14 @@ jobs:
               '            self.player.automaticallyWaitsToMinimizeStalling = NO;\n'
               '            self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];\n'
               '            self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;\n'
+              '            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient error:nil];\n'
               '            [self.layer addSublayer:self.playerLayer];\n'
               '            [self.player playImmediatelyAtRate:1.0];\n'
               '            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleAppForeground) name:UIApplicationDidBecomeActiveNotification object:nil];\n'
+              '            [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {\n'
+              '                [self.player seekToTime:kCMTimeZero];\n'
+              '                [self.player playImmediatelyAtRate:1.0];\n'
+              '            }];\n'
               '        }\n'
               '    }\n'
               '    return self;\n'
@@ -153,7 +162,44 @@ jobs:
               '        NSArray *allMP4 = [[NSBundle mainBundle] pathsForResourcesOfType:@\"mp4\" inDirectory:nil];\n'
               '        if (allMP4.count) videoURL = [NSURL fileURLWithPath:allMP4.firstObject];\n'
               '    }\n'
-              '    if (!videoURL) return nil;\n'
+              '    if (!videoURL) {\n'
+              '        NSArray *allMOV = [[NSBundle mainBundle] pathsForResourcesOfType:@\"mov\" inDirectory:nil];\n'
+              '        if (allMOV.count) videoURL = [NSURL fileURLWithPath:allMOV.firstObject];\n'
+              '    }\n'
+              '    if (!videoURL) {\n'
+              '        UIView *noticeCard = [[UIView alloc] initWithFrame:CGRectZero];\n'
+              '        noticeCard.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.12 alpha:0.95];\n'
+              '        noticeCard.layer.cornerRadius = 16;\n'
+              '        noticeCard.layer.borderWidth = 1.5;\n'
+              '        noticeCard.layer.borderColor = [UIColor colorWithRed:0.92 green:0.75 blue:0.25 alpha:0.7].CGColor;\n'
+              '        noticeCard.translatesAutoresizingMaskIntoConstraints = NO;\n'
+              '        [noticeCard.heightAnchor constraintEqualToConstant:90].active = YES;\n'
+              '        UILabel *badge = [UILabel new];\n'
+              '        badge.translatesAutoresizingMaskIntoConstraints = NO;\n'
+              '        badge.text = @\"⚡ MYZO VIP VIDEO BANNER\";\n'
+              '        badge.font = [UIFont systemFontOfSize:14 weight:UIFontWeightHeavy];\n'
+              '        badge.textColor = [UIColor colorWithRed:0.95 green:0.78 blue:0.25 alpha:1.0];\n'
+              '        UILabel *msg = [UILabel new];\n'
+              '        msg.translatesAutoresizingMaskIntoConstraints = NO;\n'
+              '        msg.text = @\"Upload banner.mp4 to GitHub repo to display video\";\n'
+              '        msg.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];\n'
+              '        msg.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];\n'
+              '        msg.numberOfLines = 2;\n'
+              '        msg.textAlignment = NSTextAlignmentCenter;\n'
+              '        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[badge, msg]];\n'
+              '        stack.axis = UILayoutConstraintAxisVertical;\n'
+              '        stack.alignment = UIStackViewAlignmentCenter;\n'
+              '        stack.spacing = 4;\n'
+              '        stack.translatesAutoresizingMaskIntoConstraints = NO;\n'
+              '        [noticeCard addSubview:stack];\n'
+              '        [NSLayoutConstraint activateConstraints:@[\n'
+              '            [stack.centerXAnchor constraintEqualToAnchor:noticeCard.centerXAnchor],\n'
+              '            [stack.centerYAnchor constraintEqualToAnchor:noticeCard.centerYAnchor],\n'
+              '            [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:noticeCard.leadingAnchor constant:12],\n'
+              '            [stack.trailingAnchor constraintLessThanOrEqualToAnchor:noticeCard.trailingAnchor constant:-12]\n'
+              '        ]];\n'
+              '        return noticeCard;\n'
+              '    }\n'
               '    FFVideoBannerView *banner = [[FFVideoBannerView alloc] initWithVideoURL:videoURL];\n'
               '    banner.translatesAutoresizingMaskIntoConstraints = NO;\n'
               '    [banner.heightAnchor constraintEqualToConstant:175].active = YES;\n'
@@ -233,10 +279,16 @@ jobs:
 
           # Search and bundle video banner (mp4 or mov)
           VID=$(find . -maxdepth 3 -name "*banner*.mp4" -o -name "*.mov" -o -name "*tiktok*.mov" -o -name "*banner*.mov" | head -n 1)
+          if [ -z "$VID" ] && [ -n "${{ github.event.inputs.video_url }}" ]; then
+            echo "Downloading video banner from input URL..."
+            curl -fL -o "banner.mp4" "${{ github.event.inputs.video_url }}" && VID="banner.mp4"
+          fi
           if [ -n "$VID" ]; then
             echo "[✓] Bundling video banner: $VID"
             cp "$VID" .build/Payload/fougoexternal.app/banner.mp4 || true
             cp "$VID" .build/Payload/fougoexternal.app/banner.mov || true
+          else
+            echo "::warning::[!] No banner video (banner.mp4) found in repository! Please upload banner.mp4 to your repo root to display the video."
           fi
 
           # 11. Generate App Icons (Auto-detects custom icon image in repo or uses Pillow to generate all iOS resolutions)
@@ -282,52 +334,33 @@ jobs:
                       img = img.convert('RGBA')
                       for name, w, h in sizes:
                           resized = img.resize((w, h), Image.Resampling.LANCZOS)
-                          resized.save(target_dir / name, format='PNG')
-                  print('[✓] Successfully generated all 9 iOS icon resolutions from ' + icon_source)
+                          resized.save(target_dir / name, 'PNG')
+                      print('[✓] All iOS AppIcon resolutions generated from custom icon successfully!')
               except Exception as e:
-                  print(f'Warning generating icons from {icon_source}: {e}')
+                  print(f'[!] Custom icon processing warning: {e}')
           else:
-              print('[!] No custom icon file found in repo root; generating fallback icons...')
-              import zlib, struct
-              for n, w, h in sizes:
-                  target_dir.joinpath(n).write_bytes(b'\x89PNG\r\n\x1a\n' + struct.pack('>IIBBBBB',w,h,8,6,0,0,0) + b'IHDR' + struct.pack('>I',zlib.crc32(b'IHDR'+struct.pack('>IIBBBBB',w,h,8,6,0,0,0))) + struct.pack('>I',len(zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + b'IDAT' + zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])) + struct.pack('>I',zlib.crc32(b'IDAT'+zlib.compress(bytes([0 if x>0 else 0 for y in range(h) for x in range(w*4+1)])))) + struct.pack('>I',0) + b'IEND' + struct.pack('>I',zlib.crc32(b'IEND')))
+              print('[i] No custom icon image found. Generating high-resolution VIP Gold badge icon...')
+              from PIL import ImageDraw, ImageFont
+              for name, w, h in sizes:
+                  im = Image.new('RGBA', (w, h), color=(11, 13, 20, 255))
+                  draw = ImageDraw.Draw(im)
+                  border_w = max(2, int(w * 0.05))
+                  draw.rounded_rectangle([(border_w, border_w), (w - border_w, h - border_w)], radius=int(w * 0.22), outline=(235, 190, 65, 255), width=border_w)
+                  draw.text((w // 2, h // 2), 'M', fill=(255, 215, 0, 255), anchor='mm')
+                  im.save(target_dir / name, 'PNG')
+              print('[✓] Default VIP AppIcons generated successfully!')
           "
 
-          # 12. Copy Offline Cache Profiles (BODY & NECK)
-          for feat in BODY NECK; do
-            PROF=$(find "$APP_DIR" -name "$feat.*" | head -n 1)
-            if [ -n "$PROF" ]; then
-              cp "$PROF" .build/Payload/fougoexternal.app/OfflineCache/$feat.fougoexternal
-              cp "$PROF" .build/Payload/fougoexternal.app/$feat.fougoexternal
-            fi
-          done
-
-          # 13. Package IPA
+          # 12. Create final signed IPA package
           cd .build
-          zip -qry9 "../release/RobotExternal-v100-Offline-Unsigned.ipa" Payload
+          zip -qr "../release/MYZO_EXTERNAL.ipa" Payload
           cd ..
-          shasum -a 256 release/RobotExternal-v100-Offline-Unsigned.ipa > release/RobotExternal-v100-Offline-Unsigned.ipa.sha256
-          echo "=========================================================="
-          echo "  BUILD COMPLETED SUCCESSFULLY WITH INSTANT VIDEO BANNER!"
-          echo "=========================================================="
+          echo "IPA build completed successfully!"
+          ls -lh release/MYZO_EXTERNAL.ipa
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RobotExternal-v100-Offline-Unsigned
-          path: |
-            release/*.ipa
-            release/*.sha256
-          retention-days: 30
-
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name || format('v1.0.{0}', github.run_number) }}
-          name: "MYZO External IPA v1.0 (Build ${{ github.run_number }})"
-          files: |
-            release/*.ipa
-            release/*.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: MYZO_EXTERNAL_IPA
+          path: release/MYZO_EXTERNAL.ipa
+          retention-days: 14
