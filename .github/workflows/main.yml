@@ -68,7 +68,7 @@ jobs:
           APP_DIR=$(dirname "$MAIN_M")
           echo "Found App Source Directory: $APP_DIR"
 
-          # 3. Auto-fix brand check, Telegram owner, and inject Instant Autoplay Video Banner
+          # 3. Auto-fix brand check, owner handle, gojoImage typo, and inject instant autoplay video banner
           TELEGRAM_HANDLE="${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}"
           [ -z "$TELEGRAM_HANDLE" ] && TELEGRAM_HANDLE="@MYZO_PANEL"
           export TELEGRAM_HANDLE
@@ -97,86 +97,70 @@ jobs:
               print('[✓] Fixed typo: replaced undeclared gojoImage with fougoImage!')
 
           # Instant Autoplay Video Banner Injection
-          banner_class = '''
-#import <AVFoundation/AVFoundation.h>
-#import <AVKit/AVKit.h>
+          banner_class = (
+              '\n#import <AVFoundation/AVFoundation.h>\n'
+              '#import <AVKit/AVKit.h>\n\n'
+              '@interface FFVideoBannerView : UIView\n'
+              '@property (nonatomic, strong) AVQueuePlayer *player;\n'
+              '@property (nonatomic, strong) AVPlayerLooper *looper;\n'
+              '@property (nonatomic, strong) AVPlayerLayer *playerLayer;\n'
+              '@end\n\n'
+              '@implementation FFVideoBannerView\n'
+              '- (instancetype)initWithVideoURL:(NSURL *)url {\n'
+              '    self = [super initWithFrame:CGRectZero];\n'
+              '    if (self) {\n'
+              '        self.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.11 alpha:0.95];\n'
+              '        self.layer.cornerRadius = 18;\n'
+              '        self.layer.cornerCurve = kCACornerCurveContinuous;\n'
+              '        self.clipsToBounds = YES;\n'
+              '        self.layer.borderWidth = 1.5;\n'
+              '        self.layer.borderColor = [UIColor colorWithRed:0.92 green:0.75 blue:0.25 alpha:0.85].CGColor;\n'
+              '        if (url) {\n'
+              '            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];\n'
+              '            self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];\n'
+              '            self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];\n'
+              '            self.player.muted = YES;\n'
+              '            self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone;\n'
+              '            self.player.automaticallyWaitsToMinimizeStalling = NO;\n'
+              '            self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];\n'
+              '            self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;\n'
+              '            [self.layer addSublayer:self.playerLayer];\n'
+              '            [self.player playImmediatelyAtRate:1.0];\n'
+              '            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleAppForeground) name:UIApplicationDidBecomeActiveNotification object:nil];\n'
+              '        }\n'
+              '    }\n'
+              '    return self;\n'
+              '}\n'
+              '- (void)handleAppForeground {\n'
+              '    if (self.player) [self.player playImmediatelyAtRate:1.0];\n'
+              '}\n'
+              '- (void)didMoveToWindow {\n'
+              '    [super didMoveToWindow];\n'
+              '    if (self.window && self.player) [self.player playImmediatelyAtRate:1.0];\n'
+              '}\n'
+              '- (void)layoutSubviews {\n'
+              '    [super layoutSubviews];\n'
+              '    self.playerLayer.frame = self.bounds;\n'
+              '}\n'
+              '@end\n'
+          )
 
-@interface FFVideoBannerView : UIView
-@property (nonatomic, strong) AVQueuePlayer *player;
-@property (nonatomic, strong) AVPlayerLooper *looper;
-@property (nonatomic, strong) AVPlayerLayer *playerLayer;
-@end
+          banner_helper = (
+              '- (UIView *)videoBannerCard {\n'
+              '    NSURL *videoURL = [[NSBundle mainBundle] URLForResource:@\"banner\" withExtension:@\"mp4\"];\n'
+              '    if (!videoURL) videoURL = [[NSBundle mainBundle] URLForResource:@\"banner\" withExtension:@\"mov\"];\n'
+              '    if (!videoURL) {\n'
+              '        NSArray *allMP4 = [[NSBundle mainBundle] pathsForResourcesOfType:@\"mp4\" inDirectory:nil];\n'
+              '        if (allMP4.count) videoURL = [NSURL fileURLWithPath:allMP4.firstObject];\n'
+              '    }\n'
+              '    if (!videoURL) return nil;\n'
+              '    FFVideoBannerView *banner = [[FFVideoBannerView alloc] initWithVideoURL:videoURL];\n'
+              '    banner.translatesAutoresizingMaskIntoConstraints = NO;\n'
+              '    [banner.heightAnchor constraintEqualToConstant:175].active = YES;\n'
+              '    return banner;\n'
+              '}\n'
+          )
 
-@implementation FFVideoBannerView
-- (instancetype)initWithVideoURL:(NSURL *)url {
-    self = [super initWithFrame:CGRectZero];
-    if (self) {
-        self.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.11 alpha:0.95];
-        self.layer.cornerRadius = 18;
-        self.layer.cornerCurve = kCACornerCurveContinuous;
-        self.clipsToBounds = YES;
-        self.layer.borderWidth = 1.5;
-        self.layer.borderColor = [UIColor colorWithRed:0.92 green:0.75 blue:0.25 alpha:0.85].CGColor;
-
-        if (url) {
-            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
-            self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
-            self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
-            self.player.muted = YES;
-            self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
-            self.player.automaticallyWaitsToMinimizeStalling = NO;
-
-            self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
-            self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
-            [self.layer addSublayer:self.playerLayer];
-            [self.player playImmediatelyAtRate:1.0];
-
-            [[NSNotificationCenter defaultCenter] addObserver:self
-                                                     selector:@selector(handleAppForeground)
-                                                         name:UIApplicationDidBecomeActiveNotification
-                                                       object:nil];
-        }
-    }
-    return self;
-}
-
-- (void)handleAppForeground {
-    if (self.player) {
-        [self.player playImmediatelyAtRate:1.0];
-    }
-}
-
-- (void)didMoveToWindow {
-    [super didMoveToWindow];
-    if (self.window && self.player) {
-        [self.player playImmediatelyAtRate:1.0];
-    }
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    self.playerLayer.frame = self.bounds;
-}
-@end
-'''
-          banner_helper = '''
-- (UIView *)videoBannerCard {
-    NSURL *videoURL = [[NSBundle mainBundle] URLForResource:@"banner" withExtension:@"mp4"];
-    if (!videoURL) {
-        videoURL = [[NSBundle mainBundle] URLForResource:@"banner" withExtension:@"mov"];
-    }
-    if (!videoURL) {
-        NSArray *allMP4 = [[NSBundle mainBundle] pathsForResourcesOfType:@"mp4" inDirectory:nil];
-        if (allMP4.count) videoURL = [NSURL fileURLWithPath:allMP4.firstObject];
-    }
-    if (!videoURL) return nil;
-
-    FFVideoBannerView *banner = [[FFVideoBannerView alloc] initWithVideoURL:videoURL];
-    banner.translatesAutoresizingMaskIntoConstraints = NO;
-    [banner.heightAnchor constraintEqualToConstant:175].active = YES;
-    return banner;
-}
-'''
           if '#import <AVFoundation/AVFoundation.h>' not in code:
               code = banner_class + '\n' + code
 
@@ -184,12 +168,13 @@ jobs:
               target = '- (void)buildControlContent {'
               code = code.replace(target, banner_helper + '\n' + target)
 
-          card_inject = '''
-    UIView *bannerCard = [self videoBannerCard];
-    if (bannerCard) {
-        [_rootStack addArrangedSubview:bannerCard];
-    }
-    UIStackView *gameInfo = [UIStackView new];'''
+          card_inject = (
+              '    UIView *bannerCard = [self videoBannerCard];\n'
+              '    if (bannerCard) {\n'
+              '        [_rootStack addArrangedSubview:bannerCard];\n'
+              '    }\n'
+              '    UIStackView *gameInfo = [UIStackView new];'
+          )
 
           if 'bannerCard' not in code:
               code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
