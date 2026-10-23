@@ -7,19 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       filza_url:
-        description: "Direct URL to FilzaSlop_1.0.3.ipa (Optional if file exists in repo)"
+        description: "Direct URL to FilzaSlop_1.0.3.ipa (Optional)"
         required: false
         default: ""
       telegram_owner:
-        description: "Telegram Support / Owner handle"
+        description: "Telegram Support Handle"
         required: false
         default: "@MYZO_PANEL"
       video_url:
-        description: "Direct URL to banner video (MP4/MOV) - Optional if file in repo"
-        required: false
-        default: ""
-      icon_url:
-        description: "Direct URL to custom App Icon (PNG/JPEG) - Optional"
+        description: "Direct URL to banner video (Optional)"
         required: false
         default: ""
 
@@ -43,197 +39,101 @@ jobs:
       - name: Install Tools
         run: pip install lief pillow
 
-      - name: Compile and Package IPA
-        env:
-          TELEGRAM_HANDLE: ${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}
+      - name: Auto Extract Project Archives
         run: |
           set -e
-
-          # 1. Auto-extract any project zip files (safely handles spaces in filenames)
           python3 -c "
           import zipfile, pathlib
           for z in pathlib.Path('.').rglob('*.zip'):
-              name_lower = z.name.lower()
-              if 'filza' not in name_lower and not z.name.startswith('.'):
-                  print(f'Extracting archive: {z}')
+              if 'filza' not in z.name.lower() and not z.name.startswith('.'):
                   try:
-                      with zipfile.ZipFile(z, 'r') as zip_ref:
-                          zip_ref.extractall('.')
-                  except Exception as e:
-                      print(f'Warning extracting {z}: {e}')
+                      with zipfile.ZipFile(z, 'r') as r: r.extractall('.')
+                  except Exception as e: print(e)
           "
 
-          # 2. Locate main.m
+      - name: Locate Source and Filza
+        run: |
+          set -e
           MAIN_M=$(find . -name "main.m" | head -n 1)
           if [ -z "$MAIN_M" ]; then
-            echo "::error::main.m not found in the repository!"
-            echo "================ REPOSITORY CONTENTS ================"
-            find . -maxdepth 3 -not -path '*/.*'
-            echo "====================================================="
-            echo "Please upload your source code (app folder or the MYZO zip file) to this repository!"
-            exit 1
+            echo "::error::main.m not found!" && exit 1
           fi
+          echo "APP_DIR=$(dirname "$MAIN_M")" >> $GITHUB_ENV
+          echo "MAIN_M=$MAIN_M" >> $GITHUB_ENV
 
-          APP_DIR=$(dirname "$MAIN_M")
-          echo "Found App Source Directory: $APP_DIR"
+          mkdir -p inputs
+          FILZA_IN="${{ github.event.inputs.filza_url }}"
+          if [ -n "$FILZA_IN" ]; then
+            curl -fL -o "inputs/FilzaSlop_1.0.3.ipa" "$FILZA_IN"
+          fi
+          FILZA_IPA=$(find . -maxdepth 4 -name "*Filza*.ipa" -o -name "*filza*.ipa" | head -n 1)
+          if [ -z "$FILZA_IPA" ]; then
+            echo "::error::FilzaSlop_1.0.3.ipa not found in repository!" && exit 1
+          fi
+          echo "FILZA_IPA=$FILZA_IPA" >> $GITHUB_ENV
 
-          # 3. Patch main.m with Anti-Crack Engine, Key Login & Autoplay Video Banner
+      - name: Setup Build Folders & Extract Bridge
+        run: |
+          set -e
+          rm -rf .build release
+          mkdir -p .build release .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework .build/Payload/fougoexternal.app/OfflineCache
+          unzip -p "$FILZA_IPA" "Payload/Filza.app/Frameworks/FilzaApplySandboxExt.dylib" > .build/FilzaApplySandboxExt.dylib
+          strip -S .build/FilzaApplySandboxExt.dylib 2>/dev/null || true
+          install_name_tool -id "@rpath/CoreTelemetry.framework/CoreTelemetry" .build/FilzaApplySandboxExt.dylib
+          python3 "$APP_DIR/protect_bridge.py" .build/FilzaApplySandboxExt.dylib .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/CoreTelemetry .build/protection_metadata.json
+          python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
+
+      - name: Patch main.m with Anti-Crack & Video Banner
+        env:
+          TG_OWNER: ${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}
+        run: |
+          set -e
           python3 -c "
           import os, re
-
-          tg = os.environ.get('TELEGRAM_HANDLE', '@MYZO_PANEL')
-          with open('$MAIN_M', 'r', encoding='utf-8', errors='ignore') as f:
-              code = f.read()
-
-          # Fix brand validation
+          tg = os.environ.get('TG_OWNER', '@MYZO_PANEL')
+          with open('$MAIN_M', 'r', encoding='utf-8', errors='ignore') as f: code = f.read()
           patch_block = f'''static NSString *const FFOwnerTelegram = @\"{tg}\";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
-          if 'isEqualToString:]' in code:
-              code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
-          if 'FFOwnerTelegram' not in code:
-              code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @\"{tg}\";', code, count=1)
-          if 'FFBrandIdentityIsValid' not in code:
-              code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
-          if 'gojoImage' in code:
-              code = code.replace('gojoImage', 'fougoImage')
+          if 'isEqualToString:]' in code: code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
+          if 'FFOwnerTelegram' not in code: code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @\"{tg}\";', code, count=1)
+          if 'FFBrandIdentityIsValid' not in code: code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
+          if 'gojoImage' in code: code = code.replace('gojoImage', 'fougoImage')
 
-          # Video Banner Class + Anti-Crack Security Engine
-          security_and_banner_header = '''
+          sec_header = '''
           #import <AVFoundation/AVFoundation.h>
           #import <AVKit/AVKit.h>
           #import <CoreMedia/CoreMedia.h>
+          #import <dlfcn.h>
           #import <sys/sysctl.h>
           #import <mach-o/dyld.h>
-          #import <dlfcn.h>
-          #import <CommonCrypto/CommonDigest.h>
 
-          #ifndef PT_DENY_ATTACH
-          #define PT_DENY_ATTACH 31
-          #endif
-          typedef int (*myzo_ptrace_t)(int request, pid_t pid, caddr_t addr, int data);
-
-          static void MYZOAntiDebugShield(void) {
-              void *handle = dlopen(NULL, RTLD_GLOBAL | RTLD_NOW);
-              if (handle) {
-                  myzo_ptrace_t ptrace_func = (myzo_ptrace_t)dlsym(handle, \"ptrace\");
-                  if (ptrace_func) {
-                      ptrace_func(PT_DENY_ATTACH, 0, 0, 0);
-                  }
-              }
-              int mib[4];
-              struct kinfo_proc info;
-              size_t size = sizeof(info);
-              memset(&info, 0, sizeof(info));
-              mib[0] = CTL_KERN;
-              mib[1] = KERN_PROC;
-              mib[2] = KERN_PROC_PID;
-              mib[3] = getpid();
-              if (sysctl(mib, 4, &info, &size, NULL, 0) == 0) {
-                  if ((info.kp_proc.p_flag & P_TRACED) != 0) {
-                      exit(177);
-                  }
-              }
+          static void MYZOAntiDebug(void) {
+              int (*p)(int,pid_t,caddr_t,int)=(int(*)(int,pid_t,caddr_t,int))dlsym(RTLD_DEFAULT,\"ptrace\");
+              if(p) p(31,0,0,0);
+              int m[4]={CTL_KERN,KERN_PROC,KERN_PROC_PID,getpid()};
+              struct kinfo_proc k;size_t s=sizeof(k);memset(&k,0,s);
+              if(sysctl(m,4,&k,&s,NULL,0)==0&&((k.kp_proc.p_flag&P_TRACED)!=0))exit(177);
           }
 
-          static BOOL MYZOInjectedDylibDetected(void) {
-              uint32_t count = _dyld_image_count();
-              const char *blacklist[] = {
-                  \"frida\", \"frida-gadget\", \"cydia\", \"substrate\", \"substitute\",
-                  \"shadow\", \"cycript\", \"sslkillswitch\", \"libhooker\", \"tweakinject\",
-                  \"igamegod\", \"gamegem\", \"cheatengine\"
-              };
-              for (uint32_t i = 0; i < count; i++) {
-                  const char *name = _dyld_get_image_name(i);
-                  if (!name) continue;
-                  for (int j = 0; j < 13; j++) {
-                      if (strcasestr(name, blacklist[j]) != NULL) {
-                          return YES;
-                      }
-                  }
+          static BOOL MYZOInjected(void) {
+              uint32_t c=_dyld_image_count();
+              const char*b[]={\"frida\",\"cydia\",\"substrate\",\"substitute\",\"shadow\",\"cycript\",\"tweakinject\"};
+              for(uint32_t i=0;i<c;i++){
+                  const char*n=_dyld_get_image_name(i);if(!n)continue;
+                  for(int j=0;j<7;j++)if(strcasestr(n,b[j]))return YES;
               }
               return NO;
           }
 
-          static NSString *MYZOSHA256Hex(NSString *input) {
-              NSData *data = [input dataUsingEncoding:NSUTF8StringEncoding];
-              unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-              CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
-              NSMutableString *res = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
-              for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
-                  [res appendFormat:@\"%02X\", digest[i]];
-              }
-              return res;
-          }
-
-          static BOOL MYZOVerifyVIPLicenseKey(NSString *rawKey) {
-              if (!rawKey || rawKey.length < 8) return NO;
-              NSString *key = [[rawKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
-
-              // Master VIP Keys (Pre-hashed with SHA-256 for zero plaintext exposure)
-              NSString *keyHash = MYZOSHA256Hex(key);
-              NSArray *masterHashes = @[
-                  MYZOSHA256Hex(@\"MYZO-VIP-LIFETIME-2026\"),
-                  MYZOSHA256Hex(@\"MYZO-MASTER-7777\"),
-                  MYZOSHA256Hex(@\"MYZO-OWNER-KEY-VIP\"),
-                  MYZOSHA256Hex(@\"MYZO-SPECIAL-PRO-2026\"),
-                  MYZOSHA256Hex(@\"MYZO-VIP-ADMIN\")
-              ];
-              if ([masterHashes containsObject:keyHash]) {
-                  return YES;
-              }
-
-              // Mathematical Algorithmic Keys (MYZO-[TIER]-[SEED]-[CHECKSUM])
-              NSArray<NSString *> *parts = [key componentsSeparatedByString:@\"-\"];
-              if (parts.count == 4 && [parts[0] isEqualToString:@\"MYZO\"]) {
-                  NSString *tier = parts[1];
-                  NSString *seed = parts[2];
-                  NSString *checksum = parts[3];
-                  if (seed.length >= 6 && checksum.length == 4) {
-                      NSString *raw = [NSString stringWithFormat:@\"MYZO:%@:%@:@MYZO_PANEL_ENCRYPTED_SALT_9973\", tier, seed];
-                      NSString *digest = [MYZOSHA256Hex(raw) substringToIndex:4];
-                      if ([checksum isEqualToString:digest]) {
-                          return YES;
-                      }
-                  }
-              }
-
-              // Device-Bound Keys (MYZO-DEVICE-[FIRST_6_UUID]-[CHECKSUM])
-              if (parts.count == 4 && [parts[0] isEqualToString:@\"MYZO\"] && [parts[1] isEqualToString:@\"DEVICE\"]) {
-                  NSString *deviceSeed = parts[2];
-                  NSString *checksum = parts[3];
-                  NSString *installID = [ZXInstallID() uppercaseString];
-                  if (installID.length >= 6 && [[installID substringToIndex:6] isEqualToString:deviceSeed]) {
-                      NSString *raw = [NSString stringWithFormat:@\"MYZO:DEVICE:%@:@MYZO_PANEL_ENCRYPTED_SALT_9973\", deviceSeed];
-                      NSString *digest = [MYZOSHA256Hex(raw) substringToIndex:4];
-                      if ([checksum isEqualToString:digest]) {
-                          return YES;
-                      }
-                  }
+          static BOOL MYZOVerify(NSString *raw) {
+              if(!raw||raw.length<8)return NO;
+              NSString *k=[[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
+              if([k isEqualToString:@\"MYZO-VIP-LIFETIME-2026\"]||[k isEqualToString:@\"MYZO-MASTER-7777\"])return YES;
+              NSArray *p=[k componentsSeparatedByString:@\"-\"];
+              if(p.count==4&&[p[0] isEqualToString:@\"MYZO\"]){
+                  NSString *r=[NSString stringWithFormat:@\"MYZO:%@:%@:@MYZO_PANEL_ENCRYPTED_SALT_9973\",p[1],p[2]];
+                  if([[FFSHA256String(r) substringToIndex:4] isEqualToString:p[3]])return YES;
               }
               return NO;
-          }
-
-          static NSString *const MYZOSavedKeyAccount = @\"myzo-vip-license-key\";
-          static NSString *const MYZODeviceTokenAccount = @\"myzo-device-token-v1\";
-
-          static void MYZOSaveVIPLicenseToKeychain(NSString *key) {
-              FFKeychainWrite(MYZOSavedKeyAccount, key);
-              NSString *token = MYZOSHA256Hex([NSString stringWithFormat:@\"%@:%@:VIP_PROTECTED\", key, ZXInstallID()]);
-              FFKeychainWrite(MYZODeviceTokenAccount, token);
-          }
-
-          static NSString *MYZOLoadVIPLicenseFromKeychain(void) {
-              return FFKeychainRead(MYZOSavedKeyAccount);
-          }
-
-          static void MYZORemoveVIPLicenseFromKeychain(void) {
-              FFKeychainDelete(MYZOSavedKeyAccount);
-              FFKeychainDelete(MYZODeviceTokenAccount);
-          }
-
-          static NSString *MYZOCurrentDeviceToken(void) {
-              NSString *saved = FFKeychainRead(MYZODeviceTokenAccount);
-              if (saved.length) return saved;
-              return MYZOSHA256Hex([NSString stringWithFormat:@\"VIP_TOKEN_%@\", ZXInstallID()]);
           }
 
           @interface FFVideoBannerView : UIView
@@ -245,40 +145,27 @@ jobs:
           @implementation FFVideoBannerView
           - (instancetype)initWithVideoURL:(NSURL *)url {
               self = [super initWithFrame:CGRectZero];
-              if (self) {
+              if (self && url) {
                   self.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.11 alpha:0.95];
                   self.layer.cornerRadius = 18;
-                  self.layer.cornerCurve = kCACornerCurveContinuous;
                   self.clipsToBounds = YES;
                   self.layer.borderWidth = 1.5;
                   self.layer.borderColor = [UIColor colorWithRed:0.92 green:0.75 blue:0.25 alpha:0.85].CGColor;
-                  if (url) {
-                      AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
-                      self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
-                      self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
-                      self.player.muted = YES;
-                      self.player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
-                      self.player.automaticallyWaitsToMinimizeStalling = NO;
-                      self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
-                      self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
-                      [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient error:nil];
-                      [self.layer addSublayer:self.playerLayer];
+                  AVPlayerItem *item = [AVPlayerItem playerItemWithURL:url];
+                  self.player = [AVQueuePlayer queuePlayerWithItems:@[item]];
+                  self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
+                  self.player.muted = YES;
+                  self.playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.player];
+                  self.playerLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
+                  [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient error:nil];
+                  [self.layer addSublayer:self.playerLayer];
+                  [self.player playImmediatelyAtRate:1.0];
+                  [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
+                      [self.player seekToTime:CMTimeMake(0, 1)];
                       [self.player playImmediatelyAtRate:1.0];
-                      [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleAppForeground) name:UIApplicationDidBecomeActiveNotification object:nil];
-                      [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {
-                          [self.player seekToTime:CMTimeMake(0, 1)];
-                          [self.player playImmediatelyAtRate:1.0];
-                      }];
-                  }
+                  }];
               }
               return self;
-          }
-          - (void)handleAppForeground {
-              if (self.player) [self.player playImmediatelyAtRate:1.0];
-          }
-          - (void)didMoveToWindow {
-              [super didMoveToWindow];
-              if (self.window && self.player) [self.player playImmediatelyAtRate:1.0];
           }
           - (void)layoutSubviews {
               [super layoutSubviews];
@@ -286,9 +173,7 @@ jobs:
           }
           @end
           '''
-
-          if '#import <AVFoundation/AVFoundation.h>' not in code:
-              code = security_and_banner_header + '\n' + code
+          if '#import <AVFoundation/AVFoundation.h>' not in code: code = sec_header + '\n' + code
 
           banner_helper = '''
           - (UIView *)videoBannerCard {
@@ -302,187 +187,87 @@ jobs:
                   NSArray *allMOV = [[NSBundle mainBundle] pathsForResourcesOfType:@\"mov\" inDirectory:nil];
                   if (allMOV.count) videoURL = [NSURL fileURLWithPath:allMOV.firstObject];
               }
-              if (!videoURL) {
-                  UIView *noticeCard = [[UIView alloc] initWithFrame:CGRectZero];
-                  noticeCard.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.12 alpha:0.95];
-                  noticeCard.layer.cornerRadius = 16;
-                  noticeCard.layer.borderWidth = 1.5;
-                  noticeCard.layer.borderColor = [UIColor colorWithRed:0.92 green:0.75 blue:0.25 alpha:0.7].CGColor;
-                  noticeCard.translatesAutoresizingMaskIntoConstraints = NO;
-                  [noticeCard.heightAnchor constraintEqualToConstant:90].active = YES;
-                  UILabel *badge = [UILabel new];
-                  badge.translatesAutoresizingMaskIntoConstraints = NO;
-                  badge.text = @\"⚡ MYZO VIP VIDEO BANNER\";
-                  badge.font = [UIFont systemFontOfSize:14 weight:UIFontWeightHeavy];
-                  badge.textColor = [UIColor colorWithRed:0.95 green:0.78 blue:0.25 alpha:1.0];
-                  UILabel *msg = [UILabel new];
-                  msg.translatesAutoresizingMaskIntoConstraints = NO;
-                  msg.text = @\"Upload banner.mp4 to GitHub repo to display video\";
-                  msg.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
-                  msg.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
-                  msg.numberOfLines = 2;
-                  msg.textAlignment = NSTextAlignmentCenter;
-                  UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[badge, msg]];
-                  stack.axis = UILayoutConstraintAxisVertical;
-                  stack.alignment = UIStackViewAlignmentCenter;
-                  stack.spacing = 4;
-                  stack.translatesAutoresizingMaskIntoConstraints = NO;
-                  [noticeCard addSubview:stack];
-                  [NSLayoutConstraint activateConstraints:@[
-                      [stack.centerXAnchor constraintEqualToAnchor:noticeCard.centerXAnchor],
-                      [stack.centerYAnchor constraintEqualToAnchor:noticeCard.centerYAnchor],
-                      [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:noticeCard.leadingAnchor constant:12],
-                      [stack.trailingAnchor constraintLessThanOrEqualToAnchor:noticeCard.trailingAnchor constant:-12]
-                  ]];
-                  return noticeCard;
-              }
+              if (!videoURL) return nil;
               FFVideoBannerView *banner = [[FFVideoBannerView alloc] initWithVideoURL:videoURL];
               banner.translatesAutoresizingMaskIntoConstraints = NO;
               [banner.heightAnchor constraintEqualToConstant:175].active = YES;
               return banner;
           }
           '''
+          if '- (UIView *)videoBannerCard' not in code: code = code.replace('- (void)buildControlContent {', banner_helper + '\n- (void)buildControlContent {')
 
-          if '- (UIView *)videoBannerCard' not in code:
-              target = '- (void)buildControlContent {'
-              code = code.replace(target, banner_helper + '\n' + target)
-
-          # Inject banner in control content
           card_inject = '''    UIView *bannerCard = [self videoBannerCard];
-          if (bannerCard) {
-              [_rootStack addArrangedSubview:bannerCard];
-          }
-          UIStackView *gameInfo = [UIStackView new];'''
-          if 'bannerCard' not in code:
-              code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
+              if (bannerCard) { [_rootStack addArrangedSubview:bannerCard]; }
+              UIStackView *gameInfo = [UIStackView new];'''
+          if 'bannerCard' not in code: code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
 
-          # Patch viewDidLoad: enforce Anti-Debug & check Keychain VIP License
-          old_offline = r'#ifdef FM_OFFLINE_BUILD\s+_statusText = @\"LOCAL MODE — READY\";.*?(?=#else)'
-          new_offline = '''    // MYZO HIGH SECURITY VIP KEY INITIALIZATION
-              MYZOAntiDebugShield();
-              if (MYZOInjectedDylibDetected()) {
-                  exit(177);
-              }
+          new_offline = '''    MYZOAntiDebug();
+              if (MYZOInjected()) exit(177);
               _features = @[@\"BODY\", @\"NECK\"];
               _allowedFeatures = FFBundledOfflineFeatures();
               _serverAvailableFeatures = FFBundledOfflineFeatures();
               _selectedTab = FFMainTabControl;
               _activeText = @\"—\";
-
-              NSString *savedKey = MYZOLoadVIPLicenseFromKeychain();
-              if (savedKey.length && MYZOVerifyVIPLicenseKey(savedKey)) {
-                  _statusText = @\"VIP LICENSE VERIFIED ✓\";
+              NSString *savedKey = FFKeychainRead(@\"myzo-key\");
+              if (savedKey.length && MYZOVerify(savedKey)) {
+                  _statusText = @\"VIP VERIFIED ✓\";
                   _screen = FFAppScreenGameSelection;
                   _licensed = YES;
-                  _activationToken = MYZOCurrentDeviceToken();
+                  _activationToken = @\"OFFLINE\";
               } else {
-                  _statusText = @\"ENTER VIP KEY TO CONTINUE\";
+                  _statusText = @\"ENTER VIP KEY\";
                   _screen = FFAppScreenAccess;
                   _licensed = NO;
                   _activationToken = nil;
               }
           '''
-          code = re.sub(old_offline, new_offline, code, count=1, flags=re.DOTALL)
+          code = re.sub(r'#ifdef FM_OFFLINE_BUILD\s+_statusText = @\"LOCAL MODE — READY\";.*?(?=#else)', new_offline, code, count=1, flags=re.DOTALL)
 
-          # Patch activateLicenseValue: instant local verification & keychain binding
-          old_act = r'- \(void\)activateLicenseValue:\(NSString \*\)licenseKey \{.*?(?=\n- \(void\)applySessionResponse:)'
           new_act = '''- (void)pasteKeyFromClipboard {
               NSString *clip = [UIPasteboard.generalPasteboard.string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-              if (clip.length) {
-                  _licenseField.text = clip;
-                  [self setStatus:@\"KEY PASTED FROM CLIPBOARD ✓\" path:nil active:nil error:NO];
-              } else {
-                  [self setStatus:@\"CLIPBOARD IS EMPTY!\" path:nil active:nil error:YES];
-              }
+              if (clip.length) { _licenseField.text = clip; [self setStatus:@\"KEY PASTED ✓\" path:nil active:nil error:NO]; }
           }
-
           - (void)openTelegramOwner {
-              NSString *handle = [FFOwnerTelegram stringByReplacingOccurrencesOfString:@\"@\" withString:@\"\"];
-              NSURL *tgURL = [NSURL URLWithString:[NSString stringWithFormat:@\"https://t.me/%@\", handle]];
-              if (tgURL) {
-                  [[UIApplication sharedApplication] openURL:tgURL options:@{} completionHandler:nil];
-              }
+              NSURL *u = [NSURL URLWithString:@\"https://t.me/MYZO_PANEL\"];
+              if (u) [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
           }
-
           - (void)activateLicenseValue:(NSString *)licenseKey {
               if (_busy) return;
               NSString *trimmed = FFLicenseKeyFromText(licenseKey);
-              if (!trimmed.length) {
-                  [self setStatus:@\"ENTER A VALID VIP ACCESS KEY\" path:nil active:@\"—\" error:YES];
-                  return;
-              }
+              if (!trimmed.length) { [self setStatus:@\"ENTER VALID VIP KEY\" path:nil active:@\"—\" error:YES]; return; }
               [self setBusy:YES];
-              [self setStatus:@\"VERIFYING KEY INTEGRITY & HARDWARE…\" path:nil active:nil error:NO];
-
-              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                  MYZOAntiDebugShield();
-                  if (MYZOInjectedDylibDetected()) {
-                      [self setBusy:NO];
-                      [self setStatus:@\"TAMPERING DETECTED! ACCESS DENIED.\" path:nil active:@\"—\" error:YES];
-                      return;
-                  }
-
-                  BOOL valid = MYZOVerifyVIPLicenseKey(trimmed);
-                  if (!valid) {
-                      [self setBusy:NO];
-                      [self setStatus:@\"INVALID VIP KEY! CONTACT @MYZO_PANEL\" path:nil active:@\"—\" error:YES];
-                      return;
-                  }
-
-                  MYZOSaveVIPLicenseToKeychain(trimmed);
-                  self->_licensed = YES;
-                  self->_activationToken = MYZOCurrentDeviceToken();
-                  self->_allowedFeatures = FFBundledOfflineFeatures();
-                  self->_serverAvailableFeatures = FFBundledOfflineFeatures();
-                  self->_selectedGameIdentifier = nil;
-                  self->_selectedFeature = nil;
-                  self->_readyToRun = NO;
-                  self->_screen = FFAppScreenGameSelection;
-                  [self setBusy:NO];
-                  [self setStatus:@\"VIP ACCESS GRANTED ✓ WELCOME!\" path:nil active:@\"—\" error:NO];
-                  [self rebuildInterface];
-              });
+              MYZOAntiDebug();
+              if (MYZOInjected()) { [self setBusy:NO]; [self setStatus:@\"TAMPERING DETECTED!\" path:nil active:@\"—\" error:YES]; return; }
+              if (!MYZOVerify(trimmed)) { [self setBusy:NO]; [self setStatus:@\"INVALID VIP KEY! CONTACT @MYZO_PANEL\" path:nil active:@\"—\" error:YES]; return; }
+              FFKeychainWrite(@\"myzo-key\", trimmed);
+              self->_licensed = YES;
+              self->_activationToken = @\"OFFLINE\";
+              self->_allowedFeatures = FFBundledOfflineFeatures();
+              self->_serverAvailableFeatures = FFBundledOfflineFeatures();
+              self->_screen = FFAppScreenGameSelection;
+              [self setBusy:NO];
+              [self setStatus:@\"VIP ACCESS GRANTED ✓\" path:nil active:@\"—\" error:NO];
+              [self rebuildInterface];
           }
           '''
-          code = re.sub(old_act, new_act, code, count=1, flags=re.DOTALL)
+          code = re.sub(r'- \(void\)activateLicenseValue:\(NSString \*\)licenseKey \{.*?(?=\n- \(void\)applySessionResponse:)', new_act, code, count=1, flags=re.DOTALL)
 
-          # Patch buildAccessContent: High-Security Cyber VIP Login UI with Instant Video Banner
-          old_bac = r'- \(void\)buildAccessContent \{.*?(?=\n- \(void\)buildGameSelectionContent:)'
           new_bac = '''- (void)buildAccessContent {
               UIView *bannerCard = [self videoBannerCard];
-              if (bannerCard) {
-                  [_rootStack addArrangedSubview:bannerCard];
-              }
-
-              [self addConsoleHeader:@\"MYZO VIP PROTOCOL\"
-                  subtitle:@\"High Security Anti-Crack & Hardware-Bound Access\" toStack:_rootStack];
-
+              if (bannerCard) { [_rootStack addArrangedSubview:bannerCard]; }
+              [self addConsoleHeader:@\"MYZO VIP PROTOCOL\" subtitle:@\"Hardware-Bound High Security Access\" toStack:_rootStack];
               UIStackView *security = [UIStackView new];
               security.axis = UILayoutConstraintAxisVertical;
               security.spacing = 8;
-              [security addArrangedSubview:[self statusBadgeWithText:@\"🛡️  ANTI-DEBUG: ENFORCED (PT_DENY_ATTACH)\"
-                  active:YES tint:UIColor.systemGreenColor]];
-              [security addArrangedSubview:[self statusBadgeWithText:@\"🔒  ANTI-HOOK: DYLD INTEGRITY MONITORED\"
-                  active:YES tint:UIColor.systemGreenColor]];
-              NSString *shortUUID = [ZXInstallID() substringToIndex:MIN(14, (NSInteger)ZXInstallID().length)];
-              [security addArrangedSubview:[self statusBadgeWithText:[NSString stringWithFormat:@\"📱  DEVICE ID: %@…\", shortUUID]
-                  active:YES tint:FFVIPGold()]];
+              [security addArrangedSubview:[self statusBadgeWithText:@\"🛡️ ANTI-DEBUG: ACTIVE (PT_DENY_ATTACH)\" active:YES tint:UIColor.systemGreenColor]];
+              [security addArrangedSubview:[self statusBadgeWithText:@\"🔒 ANTI-INJECTION: DYLD MONITOR ENFORCED\" active:YES tint:UIColor.systemGreenColor]];
               [_rootStack addArrangedSubview:[self cardWithContent:security]];
 
               _licenseField = [UITextField new];
-              _licenseField.placeholder = @\"ENTER VIP KEY (e.g. MYZO-VIP-...)\";
-              _licenseField.attributedPlaceholder = [[NSAttributedString alloc]
-                  initWithString:@\"ENTER VIP KEY (e.g. MYZO-VIP-...)\"
-                  attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:0.45 alpha:1.0]}];
+              _licenseField.placeholder = @\"ENTER VIP KEY (MYZO-...)\";
               _licenseField.textColor = FFPrimaryText();
-              _licenseField.clearButtonMode = UITextFieldViewModeWhileEditing;
-              _licenseField.returnKeyType = UIReturnKeyDone;
-              _licenseField.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
-              _licenseField.autocorrectionType = UITextAutocorrectionTypeNo;
-              _licenseField.spellCheckingType = UITextSpellCheckingTypeNo;
               _licenseField.backgroundColor = FFVIPPanel();
               _licenseField.layer.cornerRadius = 16;
-              _licenseField.layer.cornerCurve = kCACornerCurveContinuous;
               _licenseField.layer.borderWidth = 1.5;
               _licenseField.layer.borderColor = [FFVIPGold() colorWithAlphaComponent:0.65].CGColor;
               _licenseField.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightBold];
@@ -491,15 +276,13 @@ jobs:
               [_licenseField.heightAnchor constraintEqualToConstant:54].active = YES;
               [_rootStack addArrangedSubview:_licenseField];
 
-              UIButton *pasteBtn = [self actionButton:@\"📋  PASTE KEY FROM CLIPBOARD\" color:FFStatusCyan() selector:@selector(pasteKeyFromClipboard)];
+              UIButton *pasteBtn = [self actionButton:@\"📋 PASTE KEY FROM CLIPBOARD\" color:FFStatusCyan() selector:@selector(pasteKeyFromClipboard)];
               [_rootStack addArrangedSubview:pasteBtn];
-
-              _licenseButton = [self actionButton:@\"⚡  VALIDATE & UNLOCK VIP\" color:FFVIPGold()
-                  selector:@selector(activateLicensePressed)];
+              _licenseButton = [self actionButton:@\"⚡ VALIDATE & UNLOCK VIP\" color:FFVIPGold() selector:@selector(activateLicensePressed)];
               [_rootStack addArrangedSubview:_licenseButton];
 
               UIButton *buyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-              [buyBtn setTitle:[NSString stringWithFormat:@\"🔑  GET VIP KEY / BUY LICENSE  •  %@\", FFOwnerTelegram] forState:UIControlStateNormal];
+              [buyBtn setTitle:@\"🔑 GET VIP KEY • @MYZO_PANEL\" forState:UIControlStateNormal];
               [buyBtn setTitleColor:FFVIPGold() forState:UIControlStateNormal];
               buyBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
               [buyBtn addTarget:self action:@selector(openTelegramOwner) forControlEvents:UIControlEventTouchUpInside];
@@ -508,64 +291,30 @@ jobs:
               UIStackView *statusStack = [UIStackView new];
               statusStack.axis = UILayoutConstraintAxisVertical;
               statusStack.spacing = 6;
-              _statusLabel = [self labelWithText:_statusText ?: @\"AWAITING VIP KEY VALIDATION\"
-                  font:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]
-                  color:_statusIsError ? UIColor.systemRedColor : UIColor.labelColor];
-              _activeLabel = [self labelWithText:[NSString stringWithFormat:@\"VIP LICENSE: %@\", _licensed ? @\"ACTIVE ✓\" : @\"LOCKED 🔒\"]
-                  font:[UIFont systemFontOfSize:12 weight:UIFontWeightSemibold] color:FFVIPGold()];
+              _statusLabel = [self labelWithText:_statusText ?: @\"AWAITING VIP KEY\" font:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:_statusIsError ? UIColor.systemRedColor : UIColor.labelColor];
+              _activeLabel = [self labelWithText:[NSString stringWithFormat:@\"STATUS: %@\", _licensed ? @\"ACTIVE ✓\" : @\"LOCKED 🔒\"] font:[UIFont systemFontOfSize:12 weight:UIFontWeightSemibold] color:FFVIPGold()];
               [statusStack addArrangedSubview:_statusLabel];
               [statusStack addArrangedSubview:_activeLabel];
               [_rootStack addArrangedSubview:[self cardWithContent:statusStack]];
-
-              dispatch_async(dispatch_get_main_queue(), ^{
-                  [self activateClipboardLicenseIfAvailable];
-              });
           }
           '''
-          code = re.sub(old_bac, new_bac, code, count=1, flags=re.DOTALL)
+          code = re.sub(r'- \(void\)buildAccessContent \{.*?(?=\n- \(void\)buildGameSelectionContent:)', new_bac, code, count=1, flags=re.DOTALL)
 
-          with open('$MAIN_M', 'w', encoding='utf-8') as f:
-              code = f.write(code)
-          print('[✓] main.m patched with Anti-Crack Shield, VIP Key Login, and Autoplay Video Banner!')
+          with open('$MAIN_M', 'w', encoding='utf-8') as f: f.write(code)
+          print('[✓] main.m patched successfully!')
           "
 
-          # 4. Locate or download Filza IPA
-          mkdir -p inputs
-          if [ -n "${{ github.event.inputs.filza_url }}" ]; then
-            echo "Downloading FilzaSlop from URL..."
-            curl -fL -o "inputs/FilzaSlop_1.0.3.ipa" "${{ github.event.inputs.filza_url }}"
-          fi
-
-          FILZA_IPA=$(find . -maxdepth 4 -name "*Filza*.ipa" -o -name "*filza*.ipa" | head -n 1)
-          if [ -z "$FILZA_IPA" ]; then
-            echo "::error::Filza IPA not found! Please ensure FilzaSlop_1.0.3.ipa is in your repo."
-            exit 1
-          fi
-          echo "Using Filza IPA: $FILZA_IPA"
-
-          # 5. Setup build folders
-          rm -rf .build release
-          mkdir -p .build release .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework .build/Payload/fougoexternal.app/OfflineCache
-
-          # 6. Extract and patch Filza bridge dylib
-          unzip -p "$FILZA_IPA" "Payload/Filza.app/Frameworks/FilzaApplySandboxExt.dylib" > .build/FilzaApplySandboxExt.dylib
-          strip -S .build/FilzaApplySandboxExt.dylib 2>/dev/null || true
-          install_name_tool -id "@rpath/CoreTelemetry.framework/CoreTelemetry" .build/FilzaApplySandboxExt.dylib
-
-          # 7. Harden with protect_bridge.py
-          python3 "$APP_DIR/protect_bridge.py" .build/FilzaApplySandboxExt.dylib .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/CoreTelemetry .build/protection_metadata.json
-
-          # 8. Generate ProtectedConfig.h
-          python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
-
-          # 9. Compile with Apple Clang (iOS 15.0+ arm64) including AVFoundation, AVKit, and CoreMedia
+      - name: Compile iOS Binary (Apple Clang arm64)
+        run: |
+          set -e
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "Using Apple SDK: $IOS_SDK"
-
           clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -framework CoreMedia -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
           strip -x .build/Payload/fougoexternal.app/fougoexternal 2>/dev/null || true
 
-          # 10. Copy Plists, Background, and Video Banner
+      - name: Bundle Assets and Video Banner
+        run: |
+          set -e
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
           cp "$APP_DIR/FrameworkInfo.plist" .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/Info.plist
           BG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
@@ -573,74 +322,19 @@ jobs:
             cp "$BG" .build/Payload/fougoexternal.app/RobotExternalBackground.jpg || true
             cp "$BG" .build/Payload/fougoexternal.app/MyzoExternalBackground.jpg || true
             cp "$BG" .build/Payload/fougoexternal.app/fougoExternalBackground.jpg || true
-            cp "$BG" .build/Payload/fougoexternal.app/Myzoexternel.jpg || true
           fi
 
-          # Search and bundle video banner (mp4 or mov)
           VID=$(find . -maxdepth 3 -name "*banner*.mp4" -o -name "*.mov" -o -name "*tiktok*.mov" -o -name "*banner*.mov" | head -n 1)
-          if [ -z "$VID" ] && [ -n "${{ github.event.inputs.video_url }}" ]; then
-            echo "Downloading video banner from input URL..."
-            curl -fL -o "banner.mp4" "${{ github.event.inputs.video_url }}" && VID="banner.mp4"
+          VIDEO_IN="${{ github.event.inputs.video_url }}"
+          if [ -z "$VID" ] && [ -n "$VIDEO_IN" ]; then
+            curl -fL -o "banner.mp4" "$VIDEO_IN" && VID="banner.mp4"
           fi
           if [ -n "$VID" ]; then
-            echo "[✓] Bundling video banner: $VID"
+            echo "[✓] Bundling video: $VID"
             cp "$VID" .build/Payload/fougoexternal.app/banner.mp4 || true
             cp "$VID" .build/Payload/fougoexternal.app/banner.mov || true
-          else
-            echo "::warning::[!] No banner video (banner.mp4) found in repository! Please upload banner.mp4 to your repo root to display the video."
           fi
 
-          # 11. Generate App Icons (Auto-detects custom icon image in repo or uses Pillow to generate all iOS resolutions)
-          if [ -n "${{ github.event.inputs.icon_url }}" ]; then
-            echo "Downloading custom icon from URL..."
-            curl -fL -o "icon.png" "${{ github.event.inputs.icon_url }}" || true
-          fi
-
-          python3 -c "
-          import os, glob
-          from pathlib import Path
-          from PIL import Image
-
-          target_dir = Path('.build/Payload/fougoexternal.app')
-          target_dir.mkdir(parents=True, exist_ok=True)
-          sizes = [
-              ('AppIcon60x60@2x.png', 120, 120),
-              ('AppIcon60x60@3x.png', 180, 180),
-              ('AppIcon76x76@2x~ipad.png', 152, 152),
-              ('AppIcon83.5x83.5@2x~ipad.png', 167, 167),
-              ('AppIcon60x60.png', 60, 60),
-              ('AppIcon76x76.png', 76, 76),
-              ('AppIcon83.5x83.5.png', 84, 84),
-              ('iTunesArtwork.png', 512, 512),
-              ('iTunesArtwork@2x.png', 1024, 1024)
-          ]
-
-          source_img = None
-          for pat in ['icon.png', 'icon.jpg', 'icon.jpeg', '*logo*.png', '*logo*.jpg', '*icon*.png', 'AppIcon*.png']:
-              matches = glob.glob(pat)
-              if matches and not matches[0].startswith('.build'):
-                  source_img = matches[0]
-                  break
-
-          if source_img and os.path.exists(source_img):
-              print(f'[✓] Generating iOS app icons from: {source_img}')
-              with Image.open(source_img) as img:
-                  img = img.convert('RGBA')
-                  for fname, w, h in sizes:
-                      resized = img.resize((w, h), Image.Resampling.LANCZOS)
-                      resized.save(target_dir / fname, 'PNG')
-          else:
-              print('[!] No icon found, creating gold VIP icon...')
-              from PIL import ImageDraw
-              img = Image.new('RGBA', (1024, 1024), color=(14, 16, 25, 255))
-              draw = ImageDraw.Draw(img)
-              draw.rectangle([(60, 60), (964, 964)], outline=(235, 190, 60, 255), width=32)
-              for fname, w, h in sizes:
-                  resized = img.resize((w, h), Image.Resampling.LANCZOS)
-                  resized.save(target_dir / fname, 'PNG')
-          "
-
-          # 12. Copy Offline Cache Profiles (BODY & NECK)
           for feat in BODY NECK; do
             PROF=$(find "$APP_DIR" -name "$feat.*" | head -n 1)
             if [ -n "$PROF" ]; then
@@ -649,14 +343,30 @@ jobs:
             fi
           done
 
-          # 13. Package and SHA256 IPA
+      - name: Generate App Icons
+        run: |
+          set -e
+          python3 -c "
+          from pathlib import Path
+          from PIL import Image, ImageDraw
+          target_dir = Path('.build/Payload/fougoexternal.app')
+          target_dir.mkdir(parents=True, exist_ok=True)
+          sizes = [('AppIcon60x60@2x.png', 120, 120), ('AppIcon60x60@3x.png', 180, 180), ('AppIcon76x76@2x~ipad.png', 152, 152), ('iTunesArtwork@2x.png', 1024, 1024)]
+          img = Image.new('RGBA', (1024, 1024), color=(14, 16, 25, 255))
+          draw = ImageDraw.Draw(img)
+          draw.rectangle([(60, 60), (964, 964)], outline=(235, 190, 60, 255), width=32)
+          for fname, w, h in sizes:
+              img.resize((w, h), Image.Resampling.LANCZOS).save(target_dir / fname, 'PNG')
+          "
+
+      - name: Package VIP IPA
+        run: |
+          set -e
           cd .build
           zip -qry9 "../release/RobotExternal-v100-VIP-Unsigned.ipa" Payload
           cd ..
           shasum -a 256 release/RobotExternal-v100-VIP-Unsigned.ipa > release/RobotExternal-v100-VIP-Unsigned.ipa.sha256
-          echo "=========================================================="
-          echo "  VIP HIGH-SECURITY IPA BUILD COMPLETED SUCCESSFULLY!"
-          echo "=========================================================="
+          echo "VIP BUILD COMPLETED SUCCESSFULLY!"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
