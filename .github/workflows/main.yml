@@ -97,7 +97,14 @@ jobs:
           with open(main_m_path, 'r', encoding='utf-8', errors='ignore') as f:
               code = f.read()
 
-          # 1. Branding patch
+          # 1. Branding patch & Clean Name Replacement
+          code = re.sub(r'self\.title\s*=\s*@"NOVA BODY";', 'self.title = @"FOUGO EXTERNAL";', code)
+          code = re.sub(r'NOVA BODY\s*(?:•|—|-)?\s*LOCAL CONTROL', 'FOUGO EXTERNAL', code, flags=re.IGNORECASE)
+          code = code.replace('NOVA BODY', 'FOUGO EXTERNAL')
+          code = code.replace('Nova Body', 'FOUGO EXTERNAL')
+          code = code.replace('NovaBody', 'FOUGO EXTERNAL')
+          code = re.sub(r'\s*(?:•|—|-)?\s*LOCAL CONTROL', '', code, flags=re.IGNORECASE)
+
           patch_block = f'''static NSString *const FFOwnerTelegram = @"{tg}";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
           if 'isEqualToString:]' in code:
               code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
@@ -418,6 +425,8 @@ jobs:
         run: |
           set -e
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
+          sed -i '' 's/NovaBody/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || sed -i 's/NovaBody/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || true
+          sed -i '' 's/FOUGO EXYERNAL/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || sed -i 's/FOUGO EXYERNAL/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || true
           cp "$APP_DIR/FrameworkInfo.plist" .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/Info.plist
           BG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
           if [ -n "$BG" ]; then
