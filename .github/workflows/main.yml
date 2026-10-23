@@ -88,26 +88,49 @@ jobs:
           TG_OWNER: ${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}
         run: |
           set -e
-          python3 -c "
+          cat << 'PYEOF' > patch_main.py
           import os, re
-          tg = os.environ.get('TG_OWNER', '@MYZO_PANEL')
-          with open('$MAIN_M', 'r', encoding='utf-8', errors='ignore') as f: code = f.read()
-          patch_block = f'''static NSString *const FFOwnerTelegram = @\"{tg}\";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
-          if 'isEqualToString:]' in code: code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
-          if 'FFOwnerTelegram' not in code: code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @\"{tg}\";', code, count=1)
-          if 'FFBrandIdentityIsValid' not in code: code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
-          if 'gojoImage' in code: code = code.replace('gojoImage', 'fougoImage')
 
-          sec_header = '''
-          #import <AVFoundation/AVFoundation.h>
+          tg = os.environ.get('TG_OWNER', '@MYZO_PANEL')
+          main_m_path = os.environ.get('MAIN_M')
+
+          with open(main_m_path, 'r', encoding='utf-8', errors='ignore') as f:
+              code = f.read()
+
+          # 1. Branding patch
+          patch_block = f'''static NSString *const FFOwnerTelegram = @"{tg}";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
+          if 'isEqualToString:]' in code:
+              code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
+          if 'FFOwnerTelegram' not in code:
+              code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @"{tg}";', code, count=1)
+          if 'FFBrandIdentityIsValid' not in code:
+              code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
+          if 'gojoImage' in code:
+              code = code.replace('gojoImage', 'fougoImage')
+
+          # 2. Anti-Debug, Anti-Injection, Independent CommonCrypto SHA-256 and Video Banner Header
+          sec_header = '''#import <AVFoundation/AVFoundation.h>
           #import <AVKit/AVKit.h>
           #import <CoreMedia/CoreMedia.h>
+          #import <CommonCrypto/CommonDigest.h>
           #import <dlfcn.h>
           #import <sys/sysctl.h>
           #import <mach-o/dyld.h>
 
+          static NSString *MYZOSHA256(NSString *input) {
+              if (!input) return @"";
+              const char *data = [input UTF8String];
+              unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+              CC_SHA256(data, (CC_LONG)strlen(data), digest);
+              NSMutableString *hex = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+              for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+                  [hex appendFormat:@"%02X", digest[i]];
+              }
+              return hex;
+          }
+
           static void MYZOAntiDebug(void) {
-              int (*p)(int,pid_t,caddr_t,int)=(int(*)(int,pid_t,caddr_t,int))dlsym(RTLD_DEFAULT,\"ptrace\");
+              int (*p)(int,pid_t,caddr_t,int)=(int(*)(int,pid_t,caddr_t,int))dlsym(RTLD_DEFAULT,"ptrace");
               if(p) p(31,0,0,0);
               int m[4]={CTL_KERN,KERN_PROC,KERN_PROC_PID,getpid()};
               struct kinfo_proc k;size_t s=sizeof(k);memset(&k,0,s);
@@ -116,7 +139,7 @@ jobs:
 
           static BOOL MYZOInjected(void) {
               uint32_t c=_dyld_image_count();
-              const char*b[]={\"frida\",\"cydia\",\"substrate\",\"substitute\",\"shadow\",\"cycript\",\"tweakinject\"};
+              const char*b[]={"frida","cydia","substrate","substitute","shadow","cycript","tweakinject"};
               for(uint32_t i=0;i<c;i++){
                   const char*n=_dyld_get_image_name(i);if(!n)continue;
                   for(int j=0;j<7;j++)if(strcasestr(n,b[j]))return YES;
@@ -127,11 +150,11 @@ jobs:
           static BOOL MYZOVerify(NSString *raw) {
               if(!raw||raw.length<8)return NO;
               NSString *k=[[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
-              if([k isEqualToString:@\"MYZO-VIP-LIFETIME-2026\"]||[k isEqualToString:@\"MYZO-MASTER-7777\"])return YES;
-              NSArray *p=[k componentsSeparatedByString:@\"-\"];
-              if(p.count==4&&[p[0] isEqualToString:@\"MYZO\"]){
-                  NSString *r=[NSString stringWithFormat:@\"MYZO:%@:%@:@MYZO_PANEL_ENCRYPTED_SALT_9973\",p[1],p[2]];
-                  if([[FFSHA256String(r) substringToIndex:4] isEqualToString:p[3]])return YES;
+              if([k isEqualToString:@"MYZO-VIP-LIFETIME-2026"]||[k isEqualToString:@"MYZO-MASTER-7777"])return YES;
+              NSArray *p=[k componentsSeparatedByString:@"-"];
+              if(p.count==4&&[p[0] isEqualToString:@"MYZO"]){
+                  NSString *r=[NSString stringWithFormat:@"MYZO:%@:%@:@MYZO_PANEL_ENCRYPTED_SALT_9973",p[1],p[2]];
+                  if([[MYZOSHA256(r) substringToIndex:4] isEqualToString:p[3]])return YES;
               }
               return NO;
           }
@@ -173,18 +196,19 @@ jobs:
           }
           @end
           '''
-          if '#import <AVFoundation/AVFoundation.h>' not in code: code = sec_header + '\n' + code
+          if '#import <AVFoundation/AVFoundation.h>' not in code:
+              code = sec_header + '\n' + code
 
-          banner_helper = '''
-          - (UIView *)videoBannerCard {
-              NSURL *videoURL = [[NSBundle mainBundle] URLForResource:@\"banner\" withExtension:@\"mp4\"];
-              if (!videoURL) videoURL = [[NSBundle mainBundle] URLForResource:@\"banner\" withExtension:@\"mov\"];
+          # 3. Add videoBannerCard method
+          banner_helper = '''- (UIView *)videoBannerCard {
+              NSURL *videoURL = [[NSBundle mainBundle] URLForResource:@"banner" withExtension:@"mp4"];
+              if (!videoURL) videoURL = [[NSBundle mainBundle] URLForResource:@"banner" withExtension:@"mov"];
               if (!videoURL) {
-                  NSArray *allMP4 = [[NSBundle mainBundle] pathsForResourcesOfType:@\"mp4\" inDirectory:nil];
+                  NSArray *allMP4 = [[NSBundle mainBundle] pathsForResourcesOfType:@"mp4" inDirectory:nil];
                   if (allMP4.count) videoURL = [NSURL fileURLWithPath:allMP4.firstObject];
               }
               if (!videoURL) {
-                  NSArray *allMOV = [[NSBundle mainBundle] pathsForResourcesOfType:@\"mov\" inDirectory:nil];
+                  NSArray *allMOV = [[NSBundle mainBundle] pathsForResourcesOfType:@"mov" inDirectory:nil];
                   if (allMOV.count) videoURL = [NSURL fileURLWithPath:allMOV.firstObject];
               }
               if (!videoURL) return nil;
@@ -194,77 +218,67 @@ jobs:
               return banner;
           }
           '''
-          if '- (UIView *)videoBannerCard' not in code: code = code.replace('- (void)buildControlContent {', banner_helper + '\n- (void)buildControlContent {')
+          if '- (UIView *)videoBannerCard' not in code:
+              code = code.replace('- (void)buildControlContent {', banner_helper + '\n- (void)buildControlContent {')
 
+          # 4. Add videoBanner to Control Content
           card_inject = '''    UIView *bannerCard = [self videoBannerCard];
               if (bannerCard) { [_rootStack addArrangedSubview:bannerCard]; }
               UIStackView *gameInfo = [UIStackView new];'''
-          if 'bannerCard' not in code: code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
+          if 'bannerCard' not in code:
+              code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
 
-          new_offline = '''    MYZOAntiDebug();
-              if (MYZOInjected()) exit(177);
-              _features = @[@\"BODY\", @\"NECK\"];
-              _allowedFeatures = FFBundledOfflineFeatures();
-              _serverAvailableFeatures = FFBundledOfflineFeatures();
-              _selectedTab = FFMainTabControl;
-              _activeText = @\"—\";
-              NSString *savedKey = FFKeychainRead(@\"myzo-key\");
-              if (savedKey.length && MYZOVerify(savedKey)) {
-                  _statusText = @\"VIP VERIFIED ✓\";
-                  _screen = FFAppScreenGameSelection;
-                  _licensed = YES;
-                  _activationToken = @\"OFFLINE\";
-              } else {
-                  _statusText = @\"ENTER VIP KEY\";
-                  _screen = FFAppScreenAccess;
-                  _licensed = NO;
-                  _activationToken = nil;
-              }
-          '''
-          code = re.sub(r'#ifdef FM_OFFLINE_BUILD\s+_statusText = @\"LOCAL MODE — READY\";.*?(?=#else)', new_offline, code, count=1, flags=re.DOTALL)
+          # 5. Fix Offline Initialization (Keep #ifdef and #else intact)
+          clean_old = """#ifdef FM_OFFLINE_BUILD\n    _statusText = @"LOCAL MODE — READY";\n    _activeText = @"—";\n    _screen = FFAppScreenGameSelection;\n    _selectedTab = FFMainTabControl;\n    _licensed = YES;\n    _activationToken = @"OFFLINE";\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n#else"""
+          if clean_old in code:
+              code = code.replace(clean_old, """#ifdef FM_OFFLINE_BUILD\n    MYZOAntiDebug();\n    if (MYZOInjected()) exit(177);\n    _features = @[@"BODY", @"NECK"];\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n    _selectedTab = FFMainTabControl;\n    _activeText = @"—";\n    NSString *savedKey = FFKeychainRead(@"myzo-key");\n    if (savedKey.length && MYZOVerify(savedKey)) {\n        _statusText = @"VIP VERIFIED ✓";\n        _screen = FFAppScreenGameSelection;\n        _licensed = YES;\n        _activationToken = @"OFFLINE";\n    } else {\n        _statusText = @"ENTER VIP KEY";\n        _screen = FFAppScreenAccess;\n        _licensed = NO;\n        _activationToken = nil;\n    }\n#else""", 1)
+          else:
+              code = re.sub(r'#ifdef FM_OFFLINE_BUILD[^\n]*\n[ \t]*_statusText = @"LOCAL MODE — READY";.*?(?=#else)', """#ifdef FM_OFFLINE_BUILD\n    MYZOAntiDebug();\n    if (MYZOInjected()) exit(177);\n    _features = @[@"BODY", @"NECK"];\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n    _selectedTab = FFMainTabControl;\n    _activeText = @"—";\n    NSString *savedKey = FFKeychainRead(@"myzo-key");\n    if (savedKey.length && MYZOVerify(savedKey)) {\n        _statusText = @"VIP VERIFIED ✓";\n        _screen = FFAppScreenGameSelection;\n        _licensed = YES;\n        _activationToken = @"OFFLINE";\n    } else {\n        _statusText = @"ENTER VIP KEY";\n        _screen = FFAppScreenAccess;\n        _licensed = NO;\n        _activationToken = nil;\n    }""", code, count=1, flags=re.DOTALL)
 
+          # 6. Replace activateLicenseValue:
           new_act = '''- (void)pasteKeyFromClipboard {
               NSString *clip = [UIPasteboard.generalPasteboard.string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-              if (clip.length) { _licenseField.text = clip; [self setStatus:@\"KEY PASTED ✓\" path:nil active:nil error:NO]; }
+              if (clip.length) { _licenseField.text = clip; [self setStatus:@"KEY PASTED ✓" path:nil active:nil error:NO]; }
           }
           - (void)openTelegramOwner {
-              NSURL *u = [NSURL URLWithString:@\"https://t.me/MYZO_PANEL\"];
+              NSURL *u = [NSURL URLWithString:@"https://t.me/MYZO_PANEL"];
               if (u) [[UIApplication sharedApplication] openURL:u options:@{} completionHandler:nil];
           }
           - (void)activateLicenseValue:(NSString *)licenseKey {
               if (_busy) return;
               NSString *trimmed = FFLicenseKeyFromText(licenseKey);
-              if (!trimmed.length) { [self setStatus:@\"ENTER VALID VIP KEY\" path:nil active:@\"—\" error:YES]; return; }
+              if (!trimmed.length) { [self setStatus:@"ENTER VALID VIP KEY" path:nil active:@"—" error:YES]; return; }
               [self setBusy:YES];
               MYZOAntiDebug();
-              if (MYZOInjected()) { [self setBusy:NO]; [self setStatus:@\"TAMPERING DETECTED!\" path:nil active:@\"—\" error:YES]; return; }
-              if (!MYZOVerify(trimmed)) { [self setBusy:NO]; [self setStatus:@\"INVALID VIP KEY! CONTACT @MYZO_PANEL\" path:nil active:@\"—\" error:YES]; return; }
-              FFKeychainWrite(@\"myzo-key\", trimmed);
+              if (MYZOInjected()) { [self setBusy:NO]; [self setStatus:@"TAMPERING DETECTED!" path:nil active:@"—" error:YES]; return; }
+              if (!MYZOVerify(trimmed)) { [self setBusy:NO]; [self setStatus:@"INVALID VIP KEY! CONTACT @MYZO_PANEL" path:nil active:@"—" error:YES]; return; }
+              FFKeychainWrite(@"myzo-key", trimmed);
               self->_licensed = YES;
-              self->_activationToken = @\"OFFLINE\";
+              self->_activationToken = @"OFFLINE";
               self->_allowedFeatures = FFBundledOfflineFeatures();
               self->_serverAvailableFeatures = FFBundledOfflineFeatures();
               self->_screen = FFAppScreenGameSelection;
               [self setBusy:NO];
-              [self setStatus:@\"VIP ACCESS GRANTED ✓\" path:nil active:@\"—\" error:NO];
+              [self setStatus:@"VIP ACCESS GRANTED ✓" path:nil active:@"—" error:NO];
               [self rebuildInterface];
           }
           '''
           code = re.sub(r'- \(void\)activateLicenseValue:\(NSString \*\)licenseKey \{.*?(?=\n- \(void\)applySessionResponse:)', new_act, code, count=1, flags=re.DOTALL)
 
+          # 7. Replace buildAccessContent
           new_bac = '''- (void)buildAccessContent {
               UIView *bannerCard = [self videoBannerCard];
               if (bannerCard) { [_rootStack addArrangedSubview:bannerCard]; }
-              [self addConsoleHeader:@\"MYZO VIP PROTOCOL\" subtitle:@\"Hardware-Bound High Security Access\" toStack:_rootStack];
+              [self addConsoleHeader:@"MYZO VIP PROTOCOL" subtitle:@"Hardware-Bound High Security Access" toStack:_rootStack];
               UIStackView *security = [UIStackView new];
               security.axis = UILayoutConstraintAxisVertical;
               security.spacing = 8;
-              [security addArrangedSubview:[self statusBadgeWithText:@\"🛡️ ANTI-DEBUG: ACTIVE (PT_DENY_ATTACH)\" active:YES tint:UIColor.systemGreenColor]];
-              [security addArrangedSubview:[self statusBadgeWithText:@\"🔒 ANTI-INJECTION: DYLD MONITOR ENFORCED\" active:YES tint:UIColor.systemGreenColor]];
+              [security addArrangedSubview:[self statusBadgeWithText:@"🛡️ ANTI-DEBUG: ACTIVE (PT_DENY_ATTACH)" active:YES tint:UIColor.systemGreenColor]];
+              [security addArrangedSubview:[self statusBadgeWithText:@"🔒 ANTI-INJECTION: DYLD MONITOR ENFORCED" active:YES tint:UIColor.systemGreenColor]];
               [_rootStack addArrangedSubview:[self cardWithContent:security]];
 
               _licenseField = [UITextField new];
-              _licenseField.placeholder = @\"ENTER VIP KEY (MYZO-...)\";
+              _licenseField.placeholder = @"ENTER VIP KEY (MYZO-...)";
               _licenseField.textColor = FFPrimaryText();
               _licenseField.backgroundColor = FFVIPPanel();
               _licenseField.layer.cornerRadius = 16;
@@ -276,13 +290,13 @@ jobs:
               [_licenseField.heightAnchor constraintEqualToConstant:54].active = YES;
               [_rootStack addArrangedSubview:_licenseField];
 
-              UIButton *pasteBtn = [self actionButton:@\"📋 PASTE KEY FROM CLIPBOARD\" color:FFStatusCyan() selector:@selector(pasteKeyFromClipboard)];
+              UIButton *pasteBtn = [self actionButton:@"📋 PASTE KEY FROM CLIPBOARD" color:FFStatusCyan() selector:@selector(pasteKeyFromClipboard)];
               [_rootStack addArrangedSubview:pasteBtn];
-              _licenseButton = [self actionButton:@\"⚡ VALIDATE & UNLOCK VIP\" color:FFVIPGold() selector:@selector(activateLicensePressed)];
+              _licenseButton = [self actionButton:@"⚡ VALIDATE & UNLOCK VIP" color:FFVIPGold() selector:@selector(activateLicensePressed)];
               [_rootStack addArrangedSubview:_licenseButton];
 
               UIButton *buyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-              [buyBtn setTitle:@\"🔑 GET VIP KEY • @MYZO_PANEL\" forState:UIControlStateNormal];
+              [buyBtn setTitle:@"🔑 GET VIP KEY • @MYZO_PANEL" forState:UIControlStateNormal];
               [buyBtn setTitleColor:FFVIPGold() forState:UIControlStateNormal];
               buyBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
               [buyBtn addTarget:self action:@selector(openTelegramOwner) forControlEvents:UIControlEventTouchUpInside];
@@ -291,8 +305,8 @@ jobs:
               UIStackView *statusStack = [UIStackView new];
               statusStack.axis = UILayoutConstraintAxisVertical;
               statusStack.spacing = 6;
-              _statusLabel = [self labelWithText:_statusText ?: @\"AWAITING VIP KEY\" font:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:_statusIsError ? UIColor.systemRedColor : UIColor.labelColor];
-              _activeLabel = [self labelWithText:[NSString stringWithFormat:@\"STATUS: %@\", _licensed ? @\"ACTIVE ✓\" : @\"LOCKED 🔒\"] font:[UIFont systemFontOfSize:12 weight:UIFontWeightSemibold] color:FFVIPGold()];
+              _statusLabel = [self labelWithText:_statusText ?: @"AWAITING VIP KEY" font:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline] color:_statusIsError ? UIColor.systemRedColor : UIColor.labelColor];
+              _activeLabel = [self labelWithText:[NSString stringWithFormat:@"STATUS: %@", _licensed ? @"ACTIVE ✓" : @"LOCKED 🔒"] font:[UIFont systemFontOfSize:12 weight:UIFontWeightSemibold] color:FFVIPGold()];
               [statusStack addArrangedSubview:_statusLabel];
               [statusStack addArrangedSubview:_activeLabel];
               [_rootStack addArrangedSubview:[self cardWithContent:statusStack]];
@@ -300,9 +314,12 @@ jobs:
           '''
           code = re.sub(r'- \(void\)buildAccessContent \{.*?(?=\n- \(void\)buildGameSelectionContent:)', new_bac, code, count=1, flags=re.DOTALL)
 
-          with open('$MAIN_M', 'w', encoding='utf-8') as f: f.write(code)
+          with open(main_m_path, 'w', encoding='utf-8') as f:
+              f.write(code)
+
           print('[✓] main.m patched successfully!')
-          "
+          PYEOF
+          python3 patch_main.py
 
       - name: Compile iOS Binary (Apple Clang arm64)
         run: |
