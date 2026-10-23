@@ -103,7 +103,8 @@ jobs:
           # Instant Autoplay Video Banner Injection
           banner_class = (
               '\n#import <AVFoundation/AVFoundation.h>\n'
-              '#import <AVKit/AVKit.h>\n\n'
+              '#import <AVKit/AVKit.h>\n'
+              '#import <CoreMedia/CoreMedia.h>\n\n'
               '@interface FFVideoBannerView : UIView\n'
               '@property (nonatomic, strong) AVQueuePlayer *player;\n'
               '@property (nonatomic, strong) AVPlayerLooper *looper;\n'
@@ -133,7 +134,7 @@ jobs:
               '            [self.player playImmediatelyAtRate:1.0];\n'
               '            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleAppForeground) name:UIApplicationDidBecomeActiveNotification object:nil];\n'
               '            [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification * _Nonnull note) {\n'
-              '                [self.player seekToTime:kCMTimeZero];\n'
+              '                [self.player seekToTime:CMTimeMake(0, 1)];\n'
               '                [self.player playImmediatelyAtRate:1.0];\n'
               '            }];\n'
               '        }\n'
@@ -259,11 +260,11 @@ jobs:
           # 8. Generate ProtectedConfig.h
           python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
 
-          # 9. Compile with Apple Clang (iOS 15.0+ arm64) including AVFoundation and AVKit
+          # 9. Compile with Apple Clang (iOS 15.0+ arm64) including AVFoundation, AVKit, and CoreMedia
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "Using Apple SDK: $IOS_SDK"
 
-          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
+          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -framework CoreMedia -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
           strip -x .build/Payload/fougoexternal.app/fougoexternal 2>/dev/null || true
 
           # 10. Copy Plists, Background, and Video Banner
