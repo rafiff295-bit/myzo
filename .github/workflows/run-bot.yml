@@ -1,0 +1,98 @@
+name: Run Telegram VIP Bot 24-7
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Auto-restarts every 5 hours (before GitHub 6-hour runner limit) for continuous 24/7 uptime
+    - cron: '0 */5 * * *'
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'telegram_bot_panel/**'
+
+# Ensure only ONE instance of the Telegram Bot is active to prevent Telegram Polling Conflict
+concurrency:
+  group: fougo-telegram-bot-instance
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  run-telegram-bot:
+    name: Run Telegram VIP Bot on GitHub
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Bot Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-telegram-bot fastapi uvicorn python-dotenv httpx
+
+      - name: Configure Git Identity for Database Auto-Sync
+        run: |
+          git config --global user.name "GitHub Actions Bot Runner"
+          git config --global user.email "actions@github.com"
+
+      - name: Start Telegram Bot & Auto-Sync Database
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN || '8972996495:AAHzb0e-FbXZAL227729BoEC-tGUncbG7cc' }}
+          OWNER_IDS: ${{ secrets.OWNER_IDS || '8245269289' }}
+          API_SECRET: FOUGO_VIP_SECRET_9973
+          DB_PATH: telegram_bot_panel/data/myzo.db
+        run: |
+          set -e
+          mkdir -p telegram_bot_panel/data
+          echo "Starting FOUGO VIP Telegram Bot..."
+          export PYTHONPATH="telegram_bot_panel:$PYTHONPATH"
+
+          # Start Bot in background
+          python3 telegram_bot_panel/bot/bot.py &
+          BOT_PID=$!
+          echo "Bot successfully launched with PID: $BOT_PID"
+
+          # Run for ~310 minutes (~5.1 hours), committing database changes every 10 minutes
+          for i in {1..31}; do
+            sleep 600 # 10 minutes
+            if ! kill -0 $BOT_PID 2>/dev/null; then
+              echo "Error: Bot process terminated unexpectedly!"
+              exit 1
+            fi
+
+            # Sync database if modified
+            if [ -f "telegram_bot_panel/data/myzo.db" ]; then
+              git add telegram_bot_panel/data/myzo.db
+              if ! git diff --cached --quiet; then
+                echo "[✓] Auto-saving database to GitHub repository..."
+                git commit -m "Auto-backup license database [skip ci]" || true
+                git push origin HEAD || true
+              fi
+            fi
+          done
+
+          # Graceful shutdown before runner timeout
+          echo "Cycle completed. Gracefully restarting bot..."
+          kill -SIGTERM $BOT_PID 2>/dev/null || true
+          wait $BOT_PID 2>/dev/null || true
+
+          # Final database commit
+          if [ -f "telegram_bot_panel/data/myzo.db" ]; then
+            git add telegram_bot_panel/data/myzo.db
+            if ! git diff --cached --quiet; then
+              git commit -m "Final sync license database before restart [skip ci]" || true
+              git push origin HEAD || true
+            fi
+          fi
+          echo "Bot iteration finished cleanly. Next scheduled run will resume seamlessly."
