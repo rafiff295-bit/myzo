@@ -5,7 +5,7 @@ on:
     branches: [ "main", "master" ]
     tags: [ "v*" ]
   schedule:
-    # Keeps the Telegram Bot running 24/7 (auto-restarts before GitHub runner limit)
+    # Keeps the Telegram Bot running 24/7 (auto-restarts before runner limit)
     - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
@@ -39,6 +39,7 @@ jobs:
   # =========================================================================
   build_ipa:
     name: Build iOS IPA (FOUGO EXTERNAL)
+    # Only skip IPA build on automated 5-hour cron keep-alive
     if: github.event_name != 'schedule'
     runs-on: macos-14
 
@@ -113,18 +114,18 @@ jobs:
               code = f.read()
 
           # 1. Branding patch & Clean Name Replacement
-          code = re.sub(r'self\.title\s*=\s*@"NOVA BODY";', 'self.title = @"FOUGO EXTERNAL";', code)
-          code = re.sub(r'NOVA BODY\s*(?:•|—|-)?\s*LOCAL CONTROL', 'FOUGO EXTERNAL', code, flags=re.IGNORECASE)
+          code = re.sub(r'self\.title\s*=\\s*@"NOVA BODY";', 'self.title = @"FOUGO EXTERNAL";', code)
+          code = re.sub(r'NOVA BODY\s*(?:\u2022|\u2014|-)?\s*LOCAL CONTROL', 'FOUGO EXTERNAL', code, flags=re.IGNORECASE)
           code = code.replace('NOVA BODY', 'FOUGO EXTERNAL')
           code = code.replace('Nova Body', 'FOUGO EXTERNAL')
           code = code.replace('NovaBody', 'FOUGO EXTERNAL')
-          code = re.sub(r'\s*(?:•|—|-)?\s*LOCAL CONTROL', '', code, flags=re.IGNORECASE)
+          code = re.sub(r'\s*(?:\u2022|\u2014|-)?\s*LOCAL CONTROL', '', code, flags=re.IGNORECASE)
 
-          patch_block = f'''static NSString *const FFOwnerTelegram = @"{tg}";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
+          patch_block = f'''static NSString *const FFOwnerTelegram = @\"{tg}\";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
           if 'isEqualToString:]' in code:
               code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
           if 'FFOwnerTelegram' not in code:
-              code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @"{tg}";', code, count=1)
+              code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @\"{tg}\";', code, count=1)
           if 'FFBrandIdentityIsValid' not in code:
               code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
           if 'gojoImage' in code:
@@ -251,11 +252,26 @@ jobs:
               code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
 
           # 5. Fix Offline Initialization
-          clean_old = """#ifdef FM_OFFLINE_BUILD\n    _statusText = @"LOCAL MODE — READY";\n    _activeText = @"—";\n    _screen = FFAppScreenGameSelection;\n    _selectedTab = FFMainTabControl;\n    _licensed = YES;\n    _activationToken = @"OFFLINE";\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n#else"""
-          if clean_old in code:
-              code = code.replace(clean_old, """#ifdef FM_OFFLINE_BUILD\n    MYZOAntiDebug();\n    if (MYZOInjected()) exit(177);\n    _features = @[@"BODY", @"NECK"];\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n    _selectedTab = FFMainTabControl;\n    _activeText = @"—";\n    NSString *savedKey = FFKeychainRead(@"myzo-key");\n    if (savedKey.length && MYZOVerify(savedKey)) {\n        _statusText = @"VIP VERIFIED ✓";\n        _screen = FFAppScreenGameSelection;\n        _licensed = YES;\n        _activationToken = @"OFFLINE";\n    } else {\n        _statusText = @"ENTER VIP KEY";\n        _screen = FFAppScreenAccess;\n        _licensed = NO;\n        _activationToken = nil;\n    }\n#else""", 1)
-          else:
-              code = re.sub(r'#ifdef FM_OFFLINE_BUILD[^\n]*\n[ \t]*_statusText = @"LOCAL MODE — READY";.*?(?=#else)', """#ifdef FM_OFFLINE_BUILD\n    MYZOAntiDebug();\n    if (MYZOInjected()) exit(177);\n    _features = @[@"BODY", @"NECK"];\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n    _selectedTab = FFMainTabControl;\n    _activeText = @"—";\n    NSString *savedKey = FFKeychainRead(@"myzo-key");\n    if (savedKey.length && MYZOVerify(savedKey)) {\n        _statusText = @"VIP VERIFIED ✓";\n        _screen = FFAppScreenGameSelection;\n        _licensed = YES;\n        _activationToken = @"OFFLINE";\n    } else {\n        _statusText = @"ENTER VIP KEY";\n        _screen = FFAppScreenAccess;\n        _licensed = NO;\n        _activationToken = nil;\n    }""", code, count=1, flags=re.DOTALL)
+          code = re.sub(r'#ifdef FM_OFFLINE_BUILD[^\n]*\n[ \t]*_statusText = @"LOCAL MODE — READY";.*?(?=#else)', """#ifdef FM_OFFLINE_BUILD
+    MYZOAntiDebug();
+    if (MYZOInjected()) exit(177);
+    _features = @[@"BODY", @"NECK"];
+    _allowedFeatures = FFBundledOfflineFeatures();
+    _serverAvailableFeatures = FFBundledOfflineFeatures();
+    _selectedTab = FFMainTabControl;
+    _activeText = @"—";
+    NSString *savedKey = FFKeychainRead(@"myzo-key");
+    if (savedKey.length && MYZOVerify(savedKey)) {
+        _statusText = @"VIP VERIFIED ✓";
+        _screen = FFAppScreenGameSelection;
+        _licensed = YES;
+        _activationToken = @"OFFLINE";
+    } else {
+        _statusText = @"ENTER VIP KEY";
+        _screen = FFAppScreenAccess;
+        _licensed = NO;
+        _activationToken = nil;
+    }""", code, count=1, flags=re.DOTALL)
 
           # 6. Replace activateLicenseValue:
           new_act = '''- (void)pasteKeyFromClipboard {
@@ -287,7 +303,7 @@ jobs:
           '''
           code = re.sub(r'- \(void\)activateLicenseValue:\(NSString \*\)licenseKey \{.*?(?=\n- \(void\)applySessionResponse:)', new_act, code, count=1, flags=re.DOTALL)
 
-          # 7. Replace buildAccessContent with Clean VIP Login UI
+          # 7. Replace buildAccessContent with VIP Login UI
           new_bac = '''- (void)buildAccessContent {
               UIView *bannerCard = [self videoBannerCard];
               if (bannerCard) { [_rootStack addArrangedSubview:bannerCard]; }
@@ -363,7 +379,7 @@ jobs:
               UIButton *buyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
               [buyBtn setTitle:@"🔑 GET VIP KEY" forState:UIControlStateNormal];
               buyBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-              [buyBtn setTitleColor:[UIColor colorWithRed:0.95 green:0.76 blue:0.20 alpha:1.0] forState:UIControlStateNormal];
+              buyBtn.setTitleColor:[UIColor colorWithRed:0.95 green:0.76 blue:0.20 alpha:1.0] forState:UIControlStateNormal];
               buyBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
               buyBtn.layer.cornerRadius = 12;
               buyBtn.layer.borderWidth = 1.0;
@@ -383,43 +399,6 @@ jobs:
           }
           '''
           code = re.sub(r'- \(void\)buildAccessContent \{.*?(?=\n- \(void\)buildGameSelectionContent:)', new_bac, code, count=1, flags=re.DOTALL)
-
-          # 8. Hide the brandStack card on Login Screen
-          old_brand = '''    UIStackView *brandStack = [UIStackView new];
-              brandStack.axis = UILayoutConstraintAxisVertical;
-              brandStack.spacing = 6;
-              UILabel *owner = [self labelWithText:[NSString stringWithFormat:@"OFFICIAL OWNER  •  %@", FFOwnerTelegram]
-                  font:[UIFont systemFontOfSize:12 weight:UIFontWeightHeavy] color:FFVIPGold()];
-              owner.textAlignment = NSTextAlignmentCenter;
-              [brandStack addArrangedSubview:owner];
-              UIButton *channel = [UIButton buttonWithType:UIButtonTypeSystem];
-              [channel setTitle:@"OFFICIAL TELEGRAM CHANNEL" forState:UIControlStateNormal];
-              [channel setTitleColor:FFStatusCyan() forState:UIControlStateNormal];
-              channel.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
-              channel.accessibilityValue = FFOfficialChannelURL;
-              [channel addTarget:self action:@selector(openOfficialChannel:) forControlEvents:UIControlEventTouchUpInside];
-              [brandStack addArrangedSubview:channel];
-              [_rootStack addArrangedSubview:[self cardWithContent:brandStack]];'''
-
-          new_brand = '''    if (_screen != FFAppScreenAccess) {
-                  UIStackView *brandStack = [UIStackView new];
-                  brandStack.axis = UILayoutConstraintAxisVertical;
-                  brandStack.spacing = 6;
-                  UILabel *owner = [self labelWithText:[NSString stringWithFormat:@"OFFICIAL OWNER  •  %@", FFOwnerTelegram]
-                      font:[UIFont systemFontOfSize:12 weight:UIFontWeightHeavy] color:FFVIPGold()];
-                  owner.textAlignment = NSTextAlignmentCenter;
-                  [brandStack addArrangedSubview:owner];
-                  UIButton *channel = [UIButton buttonWithType:UIButtonTypeSystem];
-                  [channel setTitle:@"OFFICIAL TELEGRAM CHANNEL" forState:UIControlStateNormal];
-                  [channel setTitleColor:FFStatusCyan() forState:UIControlStateNormal];
-                  channel.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
-                  channel.accessibilityValue = FFOfficialChannelURL;
-                  [channel addTarget:self action:@selector(openOfficialChannel:) forControlEvents:UIControlEventTouchUpInside];
-                  [brandStack addArrangedSubview:channel];
-                  [_rootStack addArrangedSubview:[self cardWithContent:brandStack]];
-              }'''
-          if old_brand in code:
-              code = code.replace(old_brand, new_brand, 1)
 
           with open(main_m_path, 'w', encoding='utf-8') as f:
               f.write(code)
@@ -441,7 +420,6 @@ jobs:
           set -e
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
           sed -i '' 's/NovaBody/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || sed -i 's/NovaBody/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || true
-          sed -i '' 's/FOUGO EXYERNAL/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || sed -i 's/FOUGO EXYERNAL/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || true
           cp "$APP_DIR/FrameworkInfo.plist" .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/Info.plist
           BG=$(find "$APP_DIR" -maxdepth 1 -name "*externel*.jpg" -o -name "*Background*.jpg" | head -n 1)
           if [ -n "$BG" ]; then
@@ -507,14 +485,13 @@ jobs:
                   with open(os.path.join(d, '.env'), 'w') as f:
                       f.write(f'BOT_TOKEN={tok}\nOWNER_IDS={own}\nAPI_SECRET=FOUGO_VIP_SECRET_9973\nPANEL_SECRET=FOUGO_PASS_9973\nDB_PATH=data/myzo.db\n')
                   shutil.make_archive('release/FOUGO_TELEGRAM_BOT_V2', 'zip', d)
-                  print(f'Successfully bundled {d} with configured .env into release/FOUGO_TELEGRAM_BOT_V2.zip')
+                  print(f'Successfully bundled {d} into release/FOUGO_TELEGRAM_BOT_V2.zip')
                   bot_bundled = True
                   break
           if not bot_bundled:
               for z in ['public/download/MYZO_TELEGRAM_BOT_V2.zip', 'MYZO_TELEGRAM_BOT_V2.zip']:
                   if os.path.isfile(z):
                       shutil.copy(z, 'release/FOUGO_TELEGRAM_BOT_V2.zip')
-                      print(f'Copied {z} to release/FOUGO_TELEGRAM_BOT_V2.zip')
                       bot_bundled = True
                       break
           "
@@ -560,11 +537,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # FIXED: No cache: "pip" requirement to avoid failure when requirements.txt is absent
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install Bot Dependencies
         run: |
