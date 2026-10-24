@@ -114,18 +114,18 @@ jobs:
               code = f.read()
 
           # 1. Branding patch & Clean Name Replacement
-          code = re.sub(r'self\.title\s*=\\s*@"NOVA BODY";', 'self.title = @"FOUGO EXTERNAL";', code)
-          code = re.sub(r'NOVA BODY\s*(?:\u2022|\u2014|-)?\s*LOCAL CONTROL', 'FOUGO EXTERNAL', code, flags=re.IGNORECASE)
+          code = re.sub(r'self\.title\s*=\s*@"NOVA BODY";', 'self.title = @"FOUGO EXTERNAL";', code)
+          code = re.sub(r'NOVA BODY\s*(?:•|—|-)?\s*LOCAL CONTROL', 'FOUGO EXTERNAL', code, flags=re.IGNORECASE)
           code = code.replace('NOVA BODY', 'FOUGO EXTERNAL')
           code = code.replace('Nova Body', 'FOUGO EXTERNAL')
           code = code.replace('NovaBody', 'FOUGO EXTERNAL')
-          code = re.sub(r'\s*(?:\u2022|\u2014|-)?\s*LOCAL CONTROL', '', code, flags=re.IGNORECASE)
+          code = re.sub(r'\s*(?:•|—|-)?\s*LOCAL CONTROL', '', code, flags=re.IGNORECASE)
 
-          patch_block = f'''static NSString *const FFOwnerTelegram = @\"{tg}\";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
+          patch_block = f'''static NSString *const FFOwnerTelegram = @"{tg}";\nstatic BOOL FFBrandIdentityIsValid(void) {{\n    return YES;\n}}'''
           if 'isEqualToString:]' in code:
               code = re.sub(r'\n[ \t]*\[FFSHA256String\(FFOfficialChannelURL\)[^\n]*\][ \t]*\n[ \t]*\}', '\n' + patch_block, code)
           if 'FFOwnerTelegram' not in code:
-              code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @\"{tg}\";', code, count=1)
+              code = re.sub(r'(static NSString \*const FFOfficialChannelURL[^\n]+;)', rf'\1\nstatic NSString *const FFOwnerTelegram = @"{tg}";', code, count=1)
           if 'FFBrandIdentityIsValid' not in code:
               code = re.sub(r'(static NSString \*FFSHA256String[^{]+\{[^}]+return result;\s*\})', r'\1\nstatic BOOL FFBrandIdentityIsValid(void) {\n    return YES;\n}', code, count=1)
           if 'gojoImage' in code:
@@ -251,27 +251,12 @@ jobs:
           if 'bannerCard' not in code:
               code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
 
-          # 5. Fix Offline Initialization
-          code = re.sub(r'#ifdef FM_OFFLINE_BUILD[^\n]*\n[ \t]*_statusText = @"LOCAL MODE — READY";.*?(?=#else)', """#ifdef FM_OFFLINE_BUILD
-    MYZOAntiDebug();
-    if (MYZOInjected()) exit(177);
-    _features = @[@"BODY", @"NECK"];
-    _allowedFeatures = FFBundledOfflineFeatures();
-    _serverAvailableFeatures = FFBundledOfflineFeatures();
-    _selectedTab = FFMainTabControl;
-    _activeText = @"—";
-    NSString *savedKey = FFKeychainRead(@"myzo-key");
-    if (savedKey.length && MYZOVerify(savedKey)) {
-        _statusText = @"VIP VERIFIED ✓";
-        _screen = FFAppScreenGameSelection;
-        _licensed = YES;
-        _activationToken = @"OFFLINE";
-    } else {
-        _statusText = @"ENTER VIP KEY";
-        _screen = FFAppScreenAccess;
-        _licensed = NO;
-        _activationToken = nil;
-    }""", code, count=1, flags=re.DOTALL)
+          # 5. Fix Offline Initialization (Keep clean single-line strings)
+          clean_old = """#ifdef FM_OFFLINE_BUILD\n    _statusText = @"LOCAL MODE — READY";\n    _activeText = @"—";\n    _screen = FFAppScreenGameSelection;\n    _selectedTab = FFMainTabControl;\n    _licensed = YES;\n    _activationToken = @"OFFLINE";\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n#else"""
+          if clean_old in code:
+              code = code.replace(clean_old, """#ifdef FM_OFFLINE_BUILD\n    MYZOAntiDebug();\n    if (MYZOInjected()) exit(177);\n    _features = @[@"BODY", @"NECK"];\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n    _selectedTab = FFMainTabControl;\n    _activeText = @"—";\n    NSString *savedKey = FFKeychainRead(@"myzo-key");\n    if (savedKey.length && MYZOVerify(savedKey)) {\n        _statusText = @"VIP VERIFIED ✓";\n        _screen = FFAppScreenGameSelection;\n        _licensed = YES;\n        _activationToken = @"OFFLINE";\n    } else {\n        _statusText = @"ENTER VIP KEY";\n        _screen = FFAppScreenAccess;\n        _licensed = NO;\n        _activationToken = nil;\n    }\n#else""", 1)
+          else:
+              code = re.sub(r'#ifdef FM_OFFLINE_BUILD[^\n]*\n[ \t]*_statusText = @"LOCAL MODE — READY";.*?(?=#else)', """#ifdef FM_OFFLINE_BUILD\n    MYZOAntiDebug();\n    if (MYZOInjected()) exit(177);\n    _features = @[@"BODY", @"NECK"];\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n    _selectedTab = FFMainTabControl;\n    _activeText = @"—";\n    NSString *savedKey = FFKeychainRead(@"myzo-key");\n    if (savedKey.length && MYZOVerify(savedKey)) {\n        _statusText = @"VIP VERIFIED ✓";\n        _screen = FFAppScreenGameSelection;\n        _licensed = YES;\n        _activationToken = @"OFFLINE";\n    } else {\n        _statusText = @"ENTER VIP KEY";\n        _screen = FFAppScreenAccess;\n        _licensed = NO;\n        _activationToken = nil;\n    }""", code, count=1, flags=re.DOTALL)
 
           # 6. Replace activateLicenseValue:
           new_act = '''- (void)pasteKeyFromClipboard {
@@ -537,7 +522,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # FIXED: No cache: "pip" requirement to avoid failure when requirements.txt is absent
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
