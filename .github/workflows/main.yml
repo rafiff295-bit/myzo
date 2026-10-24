@@ -1,9 +1,12 @@
-name: Build MYZO External IPA
+name: FOUGO VIP Suite - IPA Build & Telegram Bot Host
 
 on:
   push:
     branches: [ "main", "master" ]
     tags: [ "v*" ]
+  schedule:
+    # Keeps the Telegram Bot running 24/7 (auto-restarts before GitHub runner limit)
+    - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
       filza_url:
@@ -14,6 +17,14 @@ on:
         description: "Telegram Support Handle"
         required: false
         default: "@MYZO_PANEL"
+      bot_token:
+        description: "Telegram Bot Token"
+        required: false
+        default: "8972996495:AAHzb0e-FbXZAL227729BoEC-tGUncbG7cc"
+      owner_id:
+        description: "Telegram Owner User ID"
+        required: false
+        default: "8245269289"
       video_url:
         description: "Direct URL to banner video (Optional)"
         required: false
@@ -23,8 +34,12 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build iOS IPA
+  # =========================================================================
+  # JOB 1: BUILD IOS IPA (FOUGO EXTERNAL with Clang arm64, Anti-Crack & Video)
+  # =========================================================================
+  build_ipa:
+    name: Build iOS IPA (FOUGO EXTERNAL)
+    if: github.event_name != 'schedule'
     runs-on: macos-14
 
     steps:
@@ -235,7 +250,7 @@ jobs:
           if 'bannerCard' not in code:
               code = code.replace('UIStackView *gameInfo = [UIStackView new];', card_inject, 1)
 
-          # 5. Fix Offline Initialization (Keep #ifdef and #else intact)
+          # 5. Fix Offline Initialization
           clean_old = """#ifdef FM_OFFLINE_BUILD\n    _statusText = @"LOCAL MODE — READY";\n    _activeText = @"—";\n    _screen = FFAppScreenGameSelection;\n    _selectedTab = FFMainTabControl;\n    _licensed = YES;\n    _activationToken = @"OFFLINE";\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n#else"""
           if clean_old in code:
               code = code.replace(clean_old, """#ifdef FM_OFFLINE_BUILD\n    MYZOAntiDebug();\n    if (MYZOInjected()) exit(177);\n    _features = @[@"BODY", @"NECK"];\n    _allowedFeatures = FFBundledOfflineFeatures();\n    _serverAvailableFeatures = FFBundledOfflineFeatures();\n    _selectedTab = FFMainTabControl;\n    _activeText = @"—";\n    NSString *savedKey = FFKeychainRead(@"myzo-key");\n    if (savedKey.length && MYZOVerify(savedKey)) {\n        _statusText = @"VIP VERIFIED ✓";\n        _screen = FFAppScreenGameSelection;\n        _licensed = YES;\n        _activationToken = @"OFFLINE";\n    } else {\n        _statusText = @"ENTER VIP KEY";\n        _screen = FFAppScreenAccess;\n        _licensed = NO;\n        _activationToken = nil;\n    }\n#else""", 1)
@@ -272,7 +287,7 @@ jobs:
           '''
           code = re.sub(r'- \(void\)activateLicenseValue:\(NSString \*\)licenseKey \{.*?(?=\n- \(void\)applySessionResponse:)', new_act, code, count=1, flags=re.DOTALL)
 
-          # 7. Replace buildAccessContent with Clean, Ultra-Premium VIP Login UI
+          # 7. Replace buildAccessContent with Clean VIP Login UI
           new_bac = '''- (void)buildAccessContent {
               UIView *bannerCard = [self videoBannerCard];
               if (bannerCard) { [_rootStack addArrangedSubview:bannerCard]; }
@@ -369,7 +384,7 @@ jobs:
           '''
           code = re.sub(r'- \(void\)buildAccessContent \{.*?(?=\n- \(void\)buildGameSelectionContent:)', new_bac, code, count=1, flags=re.DOTALL)
 
-          # 8. Hide the brandStack card on Login Screen (remove useless footer box)
+          # 8. Hide the brandStack card on Login Screen
           old_brand = '''    UIStackView *brandStack = [UIStackView new];
               brandStack.axis = UILayoutConstraintAxisVertical;
               brandStack.spacing = 6;
@@ -470,22 +485,49 @@ jobs:
               img.resize((w, h), Image.Resampling.LANCZOS).save(target_dir / fname, 'PNG')
           "
 
-      - name: Package VIP IPA
+      - name: Package VIP IPA & Telegram Bot Suite
+        env:
+          INPUT_BOT_TOKEN: ${{ github.event.inputs.bot_token || '8972996495:AAHzb0e-FbXZAL227729BoEC-tGUncbG7cc' }}
+          INPUT_OWNER_ID: ${{ github.event.inputs.owner_id || '8245269289' }}
         run: |
           set -e
           cd .build
           zip -qry9 "../release/RobotExternal-v100-VIP-Unsigned.ipa" Payload
           cd ..
           shasum -a 256 release/RobotExternal-v100-VIP-Unsigned.ipa > release/RobotExternal-v100-VIP-Unsigned.ipa.sha256
-          echo "VIP BUILD COMPLETED SUCCESSFULLY!"
 
-      - name: Upload IPA Artifact
+          # Bundle the 100% button-driven Telegram Bot + License API
+          python3 -c "
+          import os, shutil
+          bot_bundled = False
+          tok = os.environ.get('INPUT_BOT_TOKEN', '8972996495:AAHzb0e-FbXZAL227729BoEC-tGUncbG7cc')
+          own = os.environ.get('INPUT_OWNER_ID', '8245269289')
+          for d in ['telegram_bot_panel', 'bot', 'telegram_bot']:
+              if os.path.isdir(d):
+                  with open(os.path.join(d, '.env'), 'w') as f:
+                      f.write(f'BOT_TOKEN={tok}\nOWNER_IDS={own}\nAPI_SECRET=FOUGO_VIP_SECRET_9973\nPANEL_SECRET=FOUGO_PASS_9973\nDB_PATH=data/myzo.db\n')
+                  shutil.make_archive('release/FOUGO_TELEGRAM_BOT_V2', 'zip', d)
+                  print(f'Successfully bundled {d} with configured .env into release/FOUGO_TELEGRAM_BOT_V2.zip')
+                  bot_bundled = True
+                  break
+          if not bot_bundled:
+              for z in ['public/download/MYZO_TELEGRAM_BOT_V2.zip', 'MYZO_TELEGRAM_BOT_V2.zip']:
+                  if os.path.isfile(z):
+                      shutil.copy(z, 'release/FOUGO_TELEGRAM_BOT_V2.zip')
+                      print(f'Copied {z} to release/FOUGO_TELEGRAM_BOT_V2.zip')
+                      bot_bundled = True
+                      break
+          "
+          echo "VIP BUILD & BOT PACKAGING COMPLETED SUCCESSFULLY!"
+
+      - name: Upload VIP Build & Bot Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: RobotExternal-v100-VIP-Unsigned
+          name: FOUGO-External-VIP-Suite
           path: |
             release/*.ipa
             release/*.sha256
+            release/*.zip
           retention-days: 30
 
       - name: Create GitHub Release
@@ -493,9 +535,105 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name || format('v1.0.{0}', github.run_number) }}
-          name: "MYZO External VIP IPA v1.0 (Build ${{ github.run_number }})"
+          name: "FOUGO External VIP IPA & Telegram Bot v1.0 (Build ${{ github.run_number }})"
           files: |
             release/*.ipa
             release/*.sha256
+            release/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =========================================================================
+  # JOB 2: RUN TELEGRAM VIP BOT (HOSTED 24/7 ON GITHUB ACTIONS RUNNER)
+  # =========================================================================
+  host_telegram_bot:
+    name: Run Telegram VIP Bot 24/7 (Cloud Runner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    concurrency:
+      group: fougo-telegram-bot-runner
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Bot Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-telegram-bot fastapi uvicorn python-dotenv httpx
+
+      - name: Configure Git Identity for Database Auto-Sync
+        run: |
+          git config --global user.name "FOUGO Bot Runner"
+          git config --global user.email "bot@fougo.internal"
+
+      - name: Launch Telegram Bot & Keep Active with Auto-Sync
+        env:
+          BOT_TOKEN: ${{ github.event.inputs.bot_token || secrets.BOT_TOKEN || '8972996495:AAHzb0e-FbXZAL227729BoEC-tGUncbG7cc' }}
+          OWNER_IDS: ${{ github.event.inputs.owner_id || secrets.OWNER_IDS || '8245269289' }}
+          API_SECRET: FOUGO_VIP_SECRET_9973
+          DB_PATH: telegram_bot_panel/data/myzo.db
+        run: |
+          set -e
+          mkdir -p telegram_bot_panel/data
+
+          # If bot files not in folder, extract from zip
+          if [ ! -f "telegram_bot_panel/bot/bot.py" ]; then
+            echo "Extracting bot package from zip..."
+            python3 -c "
+            import zipfile, os
+            for z in ['public/download/MYZO_TELEGRAM_BOT_V2.zip', 'MYZO_TELEGRAM_BOT_V2.zip']:
+                if os.path.isfile(z):
+                    with zipfile.ZipFile(z, 'r') as r:
+                        r.extractall('telegram_bot_panel')
+                    break
+            "
+          fi
+
+          export PYTHONPATH="telegram_bot_panel:$PYTHONPATH"
+          echo "Starting FOUGO VIP Telegram Bot on GitHub Actions..."
+          python3 telegram_bot_panel/bot/bot.py &
+          BOT_PID=$!
+          echo "Bot successfully running with PID: $BOT_PID"
+
+          # Run for ~310 minutes (~5.1 hours), committing database changes every 10 minutes
+          for i in {1..31}; do
+            sleep 600
+            if ! kill -0 $BOT_PID 2>/dev/null; then
+              echo "Error: Bot process terminated unexpectedly!"
+              exit 1
+            fi
+
+            # Auto-save database to GitHub if modified
+            if [ -f "telegram_bot_panel/data/myzo.db" ]; then
+              git add telegram_bot_panel/data/myzo.db
+              if ! git diff --cached --quiet; then
+                echo "[✓] Auto-saving database to GitHub repository..."
+                git commit -m "Auto-backup license database [skip ci]" || true
+                git push origin HEAD || true
+              fi
+            fi
+          done
+
+          # Graceful shutdown before runner timeout
+          echo "Cycle completed. Gracefully restarting bot..."
+          kill -SIGTERM $BOT_PID 2>/dev/null || true
+          wait $BOT_PID 2>/dev/null || true
+
+          if [ -f "telegram_bot_panel/data/myzo.db" ]; then
+            git add telegram_bot_panel/data/myzo.db
+            if ! git diff --cached --quiet; then
+              git commit -m "Final sync license database before restart [skip ci]" || true
+              git push origin HEAD || true
+            fi
+          fi
+          echo "Bot cycle finished cleanly. Next scheduled run will resume seamlessly."
