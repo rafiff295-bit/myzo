@@ -364,7 +364,7 @@ jobs:
               UIButton *buyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
               [buyBtn setTitle:@"🔑 GET VIP KEY" forState:UIControlStateNormal];
               buyBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
-              buyBtn.setTitleColor:[UIColor colorWithRed:0.95 green:0.76 blue:0.20 alpha:1.0] forState:UIControlStateNormal];
+              [buyBtn setTitleColor:[UIColor colorWithRed:0.95 green:0.76 blue:0.20 alpha:1.0] forState:UIControlStateNormal];
               buyBtn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
               buyBtn.layer.cornerRadius = 12;
               buyBtn.layer.borderWidth = 1.0;
@@ -384,6 +384,51 @@ jobs:
           }
           '''
           code = re.sub(r'- \(void\)buildAccessContent \{.*?(?=\n- \(void\)buildGameSelectionContent:)', new_bac, code, count=1, flags=re.DOTALL)
+
+          # 8. Hide the brandStack card on Login Screen (remove useless footer box)
+          old_brand = '''    UIStackView *brandStack = [UIStackView new];
+              brandStack.axis = UILayoutConstraintAxisVertical;
+              brandStack.spacing = 6;
+              UILabel *owner = [self labelWithText:[NSString stringWithFormat:@"OFFICIAL OWNER  •  %@", FFOwnerTelegram]
+                  font:[UIFont systemFontOfSize:12 weight:UIFontWeightHeavy] color:FFVIPGold()];
+              owner.textAlignment = NSTextAlignmentCenter;
+              [brandStack addArrangedSubview:owner];
+              UIButton *channel = [UIButton buttonWithType:UIButtonTypeSystem];
+              [channel setTitle:@"OFFICIAL TELEGRAM CHANNEL" forState:UIControlStateNormal];
+              [channel setTitleColor:FFStatusCyan() forState:UIControlStateNormal];
+              channel.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+              channel.accessibilityValue = FFOfficialChannelURL;
+              [channel addTarget:self action:@selector(openOfficialChannel:) forControlEvents:UIControlEventTouchUpInside];
+              [brandStack addArrangedSubview:channel];
+              [_rootStack addArrangedSubview:[self cardWithContent:brandStack]];'''
+
+          new_brand = '''    if (_screen != FFAppScreenAccess) {
+                  UIStackView *brandStack = [UIStackView new];
+                  brandStack.axis = UILayoutConstraintAxisVertical;
+                  brandStack.spacing = 6;
+                  UILabel *owner = [self labelWithText:[NSString stringWithFormat:@"OFFICIAL OWNER  •  %@", FFOwnerTelegram]
+                      font:[UIFont systemFontOfSize:12 weight:UIFontWeightHeavy] color:FFVIPGold()];
+                  owner.textAlignment = NSTextAlignmentCenter;
+                  [brandStack addArrangedSubview:owner];
+                  UIButton *channel = [UIButton buttonWithType:UIButtonTypeSystem];
+                  [channel setTitle:@"OFFICIAL TELEGRAM CHANNEL" forState:UIControlStateNormal];
+                  [channel setTitleColor:FFStatusCyan() forState:UIControlStateNormal];
+                  channel.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+                  channel.accessibilityValue = FFOfficialChannelURL;
+                  [channel addTarget:self action:@selector(openOfficialChannel:) forControlEvents:UIControlEventTouchUpInside];
+                  [brandStack addArrangedSubview:channel];
+                  [_rootStack addArrangedSubview:[self cardWithContent:brandStack]];
+              }'''
+          if old_brand in code:
+              code = code.replace(old_brand, new_brand, 1)
+
+          # Auto-fix missing bracket Objective-C syntax in main.m
+          code = code.replace('buyBtn.setTitleColor:[', '[buyBtn setTitleColor:[')
+          code = code.replace('pasteBtn.setTitleColor:[', '[pasteBtn setTitleColor:[')
+          code = re.sub(r'(?<!\[)buyBtn\.setTitleColor:\s*\[', r'[buyBtn setTitleColor:[', code)
+          code = re.sub(r'(?<!\[)pasteBtn\.setTitleColor:\s*\[', r'[pasteBtn setTitleColor:[', code)
+          code = re.sub(r'(?<!\[)([a-zA-Z0-9_]+)\.setTitleColor:\s*\[', r'[\1 setTitleColor:[', code)
+          code = re.sub(r'(?<!\[)([a-zA-Z0-9_]+)\.setTitle:\s*@', r'[\1 setTitle:@', code)
 
           with open(main_m_path, 'w', encoding='utf-8') as f:
               f.write(code)
@@ -547,22 +592,18 @@ jobs:
           set -e
           mkdir -p telegram_bot_panel/data
 
-          # If bot files not in folder, extract from zip
-          if [ ! -f "telegram_bot_panel/bot/bot.py" ]; then
-            echo "Extracting bot package from zip..."
-            python3 -c "
-            import zipfile, os
-            for z in ['public/download/MYZO_TELEGRAM_BOT_V2.zip', 'MYZO_TELEGRAM_BOT_V2.zip']:
-                if os.path.isfile(z):
-                    with zipfile.ZipFile(z, 'r') as r:
-                        r.extractall('telegram_bot_panel')
-                    break
-            "
+          # Ensure standalone bot script is available (self-contained zero-dependency)
+          if [ ! -f "telegram_bot_panel/bot/bot.py" ] && [ ! -f "bot_runner.py" ]; then
+            echo "Unpacking self-contained FOUGO VIP Telegram Bot..."
+            echo "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" | base64 -d | gzip -d > bot_runner.py
           fi
 
-          export PYTHONPATH="telegram_bot_panel:$PYTHONPATH"
-          echo "Starting FOUGO VIP Telegram Bot on GitHub Actions..."
-          python3 telegram_bot_panel/bot/bot.py &
+          if [ -f "telegram_bot_panel/bot/bot.py" ]; then
+            export PYTHONPATH="telegram_bot_panel:$PYTHONPATH"
+            python3 telegram_bot_panel/bot/bot.py &
+          else
+            python3 bot_runner.py &
+          fi
           BOT_PID=$!
           echo "Bot successfully running with PID: $BOT_PID"
 
