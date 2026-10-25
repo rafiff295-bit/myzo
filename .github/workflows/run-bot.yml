@@ -3,14 +3,11 @@ name: Run Telegram VIP Bot 24-7
 on:
   workflow_dispatch:
   schedule:
-    # Auto-restarts every 5 hours (before GitHub 6-hour runner limit) for continuous 24/7 uptime
+    # Auto-restarts every 5 hours for continuous 24/7 uptime
     - cron: '0 */5 * * *'
   push:
     branches: [ "main", "master" ]
-    paths:
-      - 'telegram_bot_panel/**'
 
-# Ensure only ONE instance of the Telegram Bot is active to prevent Telegram Polling Conflict
 concurrency:
   group: fougo-telegram-bot-instance
   cancel-in-progress: true
@@ -34,7 +31,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install Bot Dependencies
         run: |
@@ -48,51 +44,44 @@ jobs:
 
       - name: Start Telegram Bot & Auto-Sync Database
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN || '8972996495:AAHzb0e-FbXZAL227729BoEC-tGUncbG7cc' }}
-          OWNER_IDS: ${{ secrets.OWNER_IDS || '8245269289' }}
+          BOT_TOKEN: "8972996495:AAHzb0e-FbXZAL227729BoEC-tGUncbG7cc"
+          OWNER_IDS: "8245269289"
           API_SECRET: FOUGO_VIP_SECRET_9973
           DB_PATH: telegram_bot_panel/data/myzo.db
         run: |
           set -e
           mkdir -p telegram_bot_panel/data
-          echo "Starting FOUGO VIP Telegram Bot..."
-          export PYTHONPATH="telegram_bot_panel:$PYTHONPATH"
 
-          # Start Bot in background
-          python3 telegram_bot_panel/bot/bot.py &
+          # Unpack standalone bot script if folder not present
+          if [ ! -f "telegram_bot_panel/bot/bot.py" ] && [ ! -f "bot_runner.py" ]; then
+            echo "Unpacking self-contained FOUGO VIP Telegram Bot..."
+            echo "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" | base64 -d | gzip -d > bot_runner.py
+          fi
+
+          if [ -f "telegram_bot_panel/bot/bot.py" ]; then
+            export PYTHONPATH="telegram_bot_panel:$PYTHONPATH"
+            python3 telegram_bot_panel/bot/bot.py &
+          else
+            python3 bot_runner.py &
+          fi
           BOT_PID=$!
-          echo "Bot successfully launched with PID: $BOT_PID"
+          echo "Bot successfully running with PID: $BOT_PID"
 
-          # Run for ~310 minutes (~5.1 hours), committing database changes every 10 minutes
+          # Keep alive and auto-sync database
           for i in {1..31}; do
-            sleep 600 # 10 minutes
+            sleep 600
             if ! kill -0 $BOT_PID 2>/dev/null; then
               echo "Error: Bot process terminated unexpectedly!"
               exit 1
             fi
-
-            # Sync database if modified
             if [ -f "telegram_bot_panel/data/myzo.db" ]; then
               git add telegram_bot_panel/data/myzo.db
               if ! git diff --cached --quiet; then
-                echo "[✓] Auto-saving database to GitHub repository..."
                 git commit -m "Auto-backup license database [skip ci]" || true
                 git push origin HEAD || true
               fi
             fi
           done
 
-          # Graceful shutdown before runner timeout
-          echo "Cycle completed. Gracefully restarting bot..."
           kill -SIGTERM $BOT_PID 2>/dev/null || true
           wait $BOT_PID 2>/dev/null || true
-
-          # Final database commit
-          if [ -f "telegram_bot_panel/data/myzo.db" ]; then
-            git add telegram_bot_panel/data/myzo.db
-            if ! git diff --cached --quiet; then
-              git commit -m "Final sync license database before restart [skip ci]" || true
-              git push origin HEAD || true
-            fi
-          fi
-          echo "Bot iteration finished cleanly. Next scheduled run will resume seamlessly."
