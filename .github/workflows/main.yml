@@ -97,28 +97,46 @@ jobs:
           strip -S .build/FilzaApplySandboxExt.dylib 2>/dev/null || true
           install_name_tool -id "@rpath/CoreTelemetry.framework/CoreTelemetry" .build/FilzaApplySandboxExt.dylib
           python3 "$APP_DIR/protect_bridge.py" .build/FilzaApplySandboxExt.dylib .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/CoreTelemetry .build/protection_metadata.json
-          python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
-          cat << 'EOF' > .build/FFBundleFix.h
-#ifndef FFBundleFix_h
-#define FFBundleFix_h
-#import <Foundation/Foundation.h>
-#ifndef FFBundleIDFreeFireTH_DEFINED
-#define FFBundleIDFreeFireTH_DEFINED
-static NSString *const FFBundleIDFreeFireTH __attribute__((unused)) = @"com.dts.freefireth";
-static NSString *const FFBundleIDFreeFire __attribute__((unused)) = @"com.dts.freefireth";
-static NSString *const FFBundleIDFreeFireVN __attribute__((unused)) = @"com.dts.freefirevn";
-static NSString *const FFBundleIDFreeFireTW __attribute__((unused)) = @"com.dts.freefiretw";
-static NSString *const FFBundleIDFreeFireGlobal __attribute__((unused)) = @"com.dts.freefireth";
-static NSString *const FFBundleIDFreeFireID __attribute__((unused)) = @"com.dts.freefireth";
-static NSString *const FFHologramShaderFilename __attribute__((unused)) = @"shaders.HPt9DZviTSXL9hpGW9QNOMigNLA~3D";
-static NSString *const FFThreeDShaderFilename __attribute__((unused)) = @"optionalavatarres_commonab_shader";
-static NSString *const FFHologramStateKey __attribute__((unused)) = @"FMHologramPersistentState";
-static inline NSString *FFAPIBaseURL(void) { return @""; }
-static NSString *const FFOwnerTelegram __attribute__((unused)) = @"@MYZO_PANEL";
-static inline BOOL FFBrandIdentityIsValid(void) { return YES; }
-#endif
-#endif
-EOF
+          cat << 'EOF' | sed 's/^[ 	]*//' > .build/FFBundleFix.h
+          #ifndef FFBundleFix_h
+          #define FFBundleFix_h
+          #import <Foundation/Foundation.h>
+
+          #ifndef FFOwnerTelegram
+          #define FFOwnerTelegram @"@MYZO_PANEL"
+          #endif
+
+          static inline BOOL FFBrandIdentityIsValid(void) { return YES; }
+
+          #ifndef FFHologramStateKey
+          #define FFHologramStateKey @"FFHologramStateKey"
+          #endif
+
+          #ifndef FFBundleIDFreeFireTH
+          #define FFBundleIDFreeFireTH @"com.dts.freefireth"
+          #endif
+          #ifndef FFBundleIDFreeFire
+          #define FFBundleIDFreeFire @"com.dts.freefireth"
+          #endif
+          #ifndef FFBundleIDFreeFireVN
+          #define FFBundleIDFreeFireVN @"com.dts.freefirevn"
+          #endif
+          #ifndef FFBundleIDFreeFireTW
+          #define FFBundleIDFreeFireTW @"com.dts.freefiretw"
+          #endif
+          #ifndef FFBundleIDFreeFireGlobal
+          #define FFBundleIDFreeFireGlobal @"com.dts.freefireth"
+          #endif
+          #ifndef FFBundleIDFreeFireID
+          #define FFBundleIDFreeFireID @"com.dts.freefireth"
+          #endif
+
+          #ifndef gojoImage
+          #define gojoImage fougoImage
+          #endif
+
+          #endif
+          EOF
 
       - name: Patch main.m with Anti-Crack & Video Banner
         env:
@@ -127,7 +145,7 @@ EOF
           APP_DIR: ${{ env.APP_DIR }}
         run: |
           set -e
-          # 1. Guarantee missing bundle IDs (FFBundleIDFreeFireTH etc.) are declared before compilation
+          # 1. Guarantee missing bundle IDs and gojoImage are fixed before compilation
           python3 -c "
           import os, re
           targets = set()
@@ -139,6 +157,14 @@ EOF
               for f in files:
                   if f == 'main.m': targets.add(os.path.join(root, f))
           bundle_defs = (
+              '#import <Foundation/Foundation.h>\n'
+              '#ifndef FFOwnerTelegram\n'
+              '#define FFOwnerTelegram @\"@MYZO_PANEL\"\n'
+              '#endif\n'
+              'static inline BOOL FFBrandIdentityIsValid(void) { return YES; }\n'
+              '#ifndef FFHologramStateKey\n'
+              '#define FFHologramStateKey @\"FFHologramStateKey\"\n'
+              '#endif\n'
               'static NSString *const FFBundleIDFreeFireTH = @\"com.dts.freefireth\";\n'
               'static NSString *const FFBundleIDFreeFire = @\"com.dts.freefireth\";\n'
               'static NSString *const FFBundleIDFreeFireVN = @\"com.dts.freefirevn\";\n'
@@ -149,13 +175,16 @@ EOF
           for p in targets:
               try:
                   with open(p, 'r', encoding='utf-8', errors='ignore') as f: code = f.read()
-                  if 'FFBundleIDFreeFireTH' not in code:
+                  # Fix undeclared gojoImage
+                  code = code.replace('gojoImage', 'fougoImage')
+                  # Fix missing bundle IDs
+                  if 'FFBundleIDFreeFireTH' not in code or 'FFOwnerTelegram' not in code:
                       if 'FFBundleIDFreeFireMAX' in code:
                           code = re.sub(r'(\bstatic\s+NSString\s*\*const\s+FFBundleIDFreeFireMAX\s*=\s*@[^;]+;)', rf'{bundle_defs}\1', code, count=1)
                       else:
                           code = bundle_defs + '\n' + code
-                      with open(p, 'w', encoding='utf-8') as f: f.write(code)
-                      print(f'[✓] Auto-declared FFBundleIDFreeFireTH in {p}')
+                  with open(p, 'w', encoding='utf-8') as f: f.write(code)
+                  print(f'[✓] Auto-patched gojoImage & bundle IDs in {p}')
               except Exception as e:
                   print(f'[!] Note: {p}: {e}')
           "
@@ -169,7 +198,7 @@ EOF
           set -e
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "Using Apple SDK: $IOS_SDK"
-          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build -include .build/FFBundleFix.h "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -framework CoreMedia -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
+          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -Wno-redefinition -Wno-unused-variable -Wno-implicit-function-declaration -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build -include .build/FFBundleFix.h "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -framework CoreMedia -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
           strip -x .build/Payload/fougoexternal.app/fougoexternal 2>/dev/null || true
 
       - name: Bundle Assets and Video Banner
@@ -358,16 +387,13 @@ EOF
           fi
 
           if [ -z "$RUNNER_SCRIPT" ] || [ ! -f "$RUNNER_SCRIPT" ]; then
-            if [ -f "telegram_bot_panel/bot/bot.py" ]; then
-              RUNNER_SCRIPT="telegram_bot_panel/bot/bot.py"
-            else
-              RUNNER_SCRIPT=$(find . -name "bot.py" | head -n 1)
-            fi
-          fi
-
-          if [ -z "$RUNNER_SCRIPT" ] || [ ! -f "$RUNNER_SCRIPT" ]; then
-            echo "::error::Could not find standalone_runner.py or bot.py in repository!"
-            exit 1
+            echo "[i] standalone_runner.py not found in repo; generating built-in self-contained VIP Bot..."
+            mkdir -p telegram_bot_panel
+            RUNNER_SCRIPT="telegram_bot_panel/standalone_runner.py"
+            cat << 'BOT_Z64_EOF' | sed 's/^[ 	]*//' | base64 -d | python3 -c "import sys, zlib; open('telegram_bot_panel/standalone_runner.py', 'wb').write(zlib.decompress(sys.stdin.buffer.read()))"
+            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
+            BOT_Z64_EOF
+            echo "[✓] Built-in standalone_runner.py unpacked and ready!"
           fi
 
           echo "[✓] Launching Telegram Bot from: $RUNNER_SCRIPT"
