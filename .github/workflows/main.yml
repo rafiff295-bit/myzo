@@ -1,45 +1,53 @@
-name: FOUGO VIP Suite - IPA Build & Telegram Bot Host
+name: Build iOS IPA & Run Telegram VIP Bot
 
 on:
-  push:
-    branches: [ "main", "master" ]
-    tags: [ "v*" ]
-  schedule:
-    # Keeps the Telegram Bot running 24/7 (auto-restarts before the 6-hour runner limit)
-    - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
-      filza_url:
-        description: "Direct URL to FilzaSlop_1.0.3.ipa (Optional)"
-        required: false
-        default: ""
-      telegram_owner:
-        description: "Telegram Support Handle"
-        required: false
-        default: "@MYZO_PANEL"
-      bot_token:
-        description: "Telegram Bot Token"
-        required: false
-        default: "9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc"
-      owner_id:
-        description: "Telegram Owner User ID"
-        required: false
-        default: "8245269289"
       video_url:
-        description: "Direct URL to banner video (Optional)"
+        description: 'Direct MP4/MOV URL for Background Video Banner (Optional)'
         required: false
-        default: ""
+        default: ''
+      filza_url:
+        description: 'Direct URL for FilzaSlop_1.0.3.ipa (Optional)'
+        required: false
+        default: ''
+      bot_token:
+        description: 'Telegram Bot Token (Optional - defaults to repo secret/built-in)'
+        required: false
+        default: '9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc'
+      owner_id:
+        description: 'Telegram Owner ID (Optional - defaults to repo secret/built-in)'
+        required: false
+        default: '8245269289'
+      telegram_owner:
+        description: 'Telegram Owner Username (e.g. @MYZO_PANEL)'
+        required: false
+        default: '@MYZO_PANEL'
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'MYZO-EXTERNAL-SOURCE/**'
+      - 'app/**'
+      - '.github/workflows/**'
+      - 'telegram_bot_panel/**'
+      - 'patch_main.py'
+  schedule:
+    # Auto-triggers every 5 hours for continuous bot uptime
+    - cron: '0 */5 * * *'
+
+concurrency:
+  group: fougo-vip-bot-pipeline
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   # =========================================================================
-  # JOB 1: BUILD IOS IPA (FOUGO EXTERNAL with Clang arm64, Anti-Crack & Video)
+  # JOB 1: BUILD VIP IOS IPA (FOUGO EXTERNAL)
   # =========================================================================
   build_ipa:
     name: Build iOS IPA (FOUGO EXTERNAL)
-    # Only skip IPA build on automated 5-hour cron keep-alive
     if: github.event_name != 'schedule'
     runs-on: macos-14
 
@@ -102,12 +110,45 @@ jobs:
       - name: Patch main.m with Anti-Crack & Video Banner
         env:
           TG_OWNER: ${{ github.event.inputs.telegram_owner || '@MYZO_PANEL' }}
+          MAIN_M: ${{ env.MAIN_M }}
+          APP_DIR: ${{ env.APP_DIR }}
         run: |
           set -e
+          # 1. Guarantee missing bundle IDs (FFBundleIDFreeFireTH etc.) are declared before compilation
+          python3 -c "
+          import os, re
+          targets = set()
+          m = os.environ.get('MAIN_M')
+          if m and os.path.isfile(m): targets.add(m)
+          app_d = os.environ.get('APP_DIR')
+          if app_d and os.path.isfile(os.path.join(app_d, 'main.m')): targets.add(os.path.join(app_d, 'main.m'))
+          for root, _, files in os.walk('.'):
+              for f in files:
+                  if f == 'main.m': targets.add(os.path.join(root, f))
+          bundle_defs = (
+              'static NSString *const FFBundleIDFreeFireTH = @\"com.dts.freefireth\";\n'
+              'static NSString *const FFBundleIDFreeFire = @\"com.dts.freefireth\";\n'
+              'static NSString *const FFBundleIDFreeFireVN = @\"com.dts.freefirevn\";\n'
+              'static NSString *const FFBundleIDFreeFireTW = @\"com.dts.freefiretw\";\n'
+              'static NSString *const FFBundleIDFreeFireGlobal = @\"com.dts.freefireth\";\n'
+              'static NSString *const FFBundleIDFreeFireID = @\"com.dts.freefireth\";\n'
+          )
+          for p in targets:
+              try:
+                  with open(p, 'r', encoding='utf-8', errors='ignore') as f: code = f.read()
+                  if not re.search(r'\bstatic\s+NSString\s*\*const\s+FFBundleIDFreeFireTH\b', code):
+                      if 'FFBundleIDFreeFireMAX' in code:
+                          code = re.sub(r'(\bstatic\s+NSString\s*\*const\s+FFBundleIDFreeFireMAX\s*=\s*@[^;]+;)', rf'{bundle_defs}\1', code, count=1)
+                      else:
+                          code = bundle_defs + '\n' + code
+                      with open(p, 'w', encoding='utf-8') as f: f.write(code)
+                      print(f'[✓] Auto-declared FFBundleIDFreeFireTH in {p}')
+              except Exception as e:
+                  print(f'[!] Note: {p}: {e}')
+          "
+          # 2. Run full feature patch script if present
           if [ -f "patch_main.py" ]; then
             python3 patch_main.py
-          else
-            echo "patch_main.py not found, skipping patch step"
           fi
 
       - name: Compile iOS Binary (Apple Clang arm64)
@@ -194,7 +235,6 @@ jobs:
           cd ..
           shasum -a 256 release/RobotExternal-v100-VIP-Unsigned.ipa > release/RobotExternal-v100-VIP-Unsigned.ipa.sha256
 
-          # Bundle the 100% button-driven Telegram Bot + License API
           python3 -c "
           import os, shutil
           bot_bundled = False
@@ -248,12 +288,9 @@ jobs:
     name: Run Telegram VIP Bot 24/7 (Cloud Runner)
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    concurrency:
-      group: fougo-telegram-bot-runner
-      cancel-in-progress: true
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -263,68 +300,46 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Bot Dependencies
+      - name: Install Bot Requirements
         run: |
           python -m pip install --upgrade pip
           pip install python-telegram-bot fastapi uvicorn python-dotenv httpx
 
-      - name: Configure Git Identity for Database Auto-Sync
+      - name: Configure Git for Persistent License Database
         run: |
-          git config --global user.name "FOUGO Bot Runner"
-          git config --global user.email "bot@fougo.internal"
+          git config --global user.name "GitHub Actions Bot Runner"
+          git config --global user.email "actions@github.com"
 
-      - name: Launch Telegram Bot & Keep Active with Auto-Sync
+      - name: Launch FOUGO VIP Telegram Bot
         env:
-          BOT_TOKEN: ${{ github.event.inputs.bot_token || secrets.BOT_TOKEN || '9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc' }}
-          OWNER_IDS: ${{ github.event.inputs.owner_id || secrets.OWNER_IDS || '8245269289' }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN || '9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc' }}
+          OWNER_IDS: ${{ secrets.OWNER_IDS || '8245269289' }}
           API_SECRET: FOUGO_VIP_SECRET_9973
           DB_PATH: telegram_bot_panel/data/myzo.db
         run: |
           set -e
           mkdir -p telegram_bot_panel/data
-
-          # Launch Telegram Bot Runner
-          if [ -f "telegram_bot_panel/standalone_runner.py" ]; then
-            python3 telegram_bot_panel/standalone_runner.py &
-          elif [ -f "telegram_bot_panel/bot/bot.py" ]; then
-            export PYTHONPATH="telegram_bot_panel:$PYTHONPATH"
-            python3 telegram_bot_panel/bot/bot.py &
-          elif [ -f "public/download/MYZO_TELEGRAM_BOT_V2.zip" ]; then
-            unzip -q -o public/download/MYZO_TELEGRAM_BOT_V2.zip -d telegram_bot_panel
-            python3 telegram_bot_panel/standalone_runner.py &
+          BOT_SCRIPT="telegram_bot_panel/bot/bot.py"
+          if [ ! -f "$BOT_SCRIPT" ]; then
+            BOT_SCRIPT=$(find . -name "bot.py" | head -n 1)
           fi
+          python3 "$BOT_SCRIPT" &
           BOT_PID=$!
-          echo "Bot successfully running with PID: $BOT_PID"
+          echo "VIP Telegram Bot running under PID: $BOT_PID"
 
-          # Run for ~310 minutes (~5.1 hours), committing database changes every 10 minutes
-          for i in {1..31}; do
+          for i in {1..34}; do
             sleep 600
             if ! kill -0 $BOT_PID 2>/dev/null; then
-              echo "Error: Bot process terminated unexpectedly!"
-              exit 1
+              echo "Bot process unexpectedly stopped! Restarting..."
+              python3 "$BOT_SCRIPT" &
+              BOT_PID=$!
             fi
-
-            # Auto-save database to GitHub if modified
-            if [ -f "telegram_bot_panel/data/myzo.db" ]; then
-              git add telegram_bot_panel/data/myzo.db
-              if ! git diff --cached --quiet; then
-                echo "[✓] Auto-saving database to GitHub repository..."
-                git commit -m "Auto-backup license database [skip ci]" || true
-                git push origin HEAD || true
-              fi
+            if git status --porcelain | grep -q "myzo.db"; then
+              git add telegram_bot_panel/data/myzo.db || true
+              git commit -m "Auto-backup VIP license database [skip ci]" || true
+              git push origin HEAD || true
+              echo "License database backed up at minute $((i*10))"
             fi
           done
-
-          # Graceful shutdown before runner timeout
-          echo "Cycle completed. Gracefully restarting bot..."
-          kill -SIGTERM $BOT_PID 2>/dev/null || true
-          wait $BOT_PID 2>/dev/null || true
-
-          if [ -f "telegram_bot_panel/data/myzo.db" ]; then
-            git add telegram_bot_panel/data/myzo.db
-            if ! git diff --cached --quiet; then
-              git commit -m "Final sync license database before restart [skip ci]" || true
-              git push origin HEAD || true
-            fi
-          fi
-          echo "Bot cycle finished cleanly. Next scheduled run will resume seamlessly."
+          kill $BOT_PID 2>/dev/null || true
+          echo "Keep-alive interval reached. Handing over cleanly to next run."
