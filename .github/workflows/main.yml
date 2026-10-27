@@ -1,53 +1,45 @@
-name: Build iOS IPA & Run Telegram VIP Bot
+name: FOUGO VIP Suite - IPA Build & Telegram Bot Host
 
 on:
-  workflow_dispatch:
-    inputs:
-      video_url:
-        description: 'Direct MP4/MOV URL for Background Video Banner (Optional)'
-        required: false
-        default: ''
-      filza_url:
-        description: 'Direct URL for FilzaSlop_1.0.3.ipa (Optional)'
-        required: false
-        default: ''
-      bot_token:
-        description: 'Telegram Bot Token (Optional - defaults to repo secret/built-in)'
-        required: false
-        default: '9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc'
-      owner_id:
-        description: 'Telegram Owner ID (Optional - defaults to repo secret/built-in)'
-        required: false
-        default: '8245269289'
-      telegram_owner:
-        description: 'Telegram Owner Username (e.g. @MYZO_PANEL)'
-        required: false
-        default: '@MYZO_PANEL'
   push:
     branches: [ "main", "master" ]
-    paths:
-      - 'MYZO-EXTERNAL-SOURCE/**'
-      - 'app/**'
-      - '.github/workflows/**'
-      - 'telegram_bot_panel/**'
-      - 'patch_main.py'
+    tags: [ "v*" ]
   schedule:
-    # Auto-triggers every 5 hours for continuous bot uptime
+    # Keeps the Telegram Bot running 24/7 (auto-restarts before the 6-hour runner limit)
     - cron: '0 */5 * * *'
-
-concurrency:
-  group: fougo-vip-bot-pipeline
-  cancel-in-progress: false
+  workflow_dispatch:
+    inputs:
+      filza_url:
+        description: "Direct URL to FilzaSlop_1.0.3.ipa (Optional)"
+        required: false
+        default: ""
+      telegram_owner:
+        description: "Telegram Support Handle"
+        required: false
+        default: "@MYZO_PANEL"
+      bot_token:
+        description: "Telegram Bot Token"
+        required: false
+        default: "9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc"
+      owner_id:
+        description: "Telegram Owner User ID"
+        required: false
+        default: "8245269289"
+      video_url:
+        description: "Direct URL to banner video (Optional)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
   # =========================================================================
-  # JOB 1: BUILD VIP IOS IPA (FOUGO EXTERNAL)
+  # JOB 1: BUILD IOS IPA (FOUGO EXTERNAL with Clang arm64, Anti-Crack & Video)
   # =========================================================================
   build_ipa:
     name: Build iOS IPA (FOUGO EXTERNAL)
+    # Only skip IPA build on automated 5-hour cron keep-alive
     if: github.event_name != 'schedule'
     runs-on: macos-14
 
@@ -106,6 +98,27 @@ jobs:
           install_name_tool -id "@rpath/CoreTelemetry.framework/CoreTelemetry" .build/FilzaApplySandboxExt.dylib
           python3 "$APP_DIR/protect_bridge.py" .build/FilzaApplySandboxExt.dylib .build/Payload/fougoexternal.app/Frameworks/CoreTelemetry.framework/CoreTelemetry .build/protection_metadata.json
           python3 -c "import json; d=json.load(open('.build/protection_metadata.json'))['slices']; open('.build/ProtectedConfig.h','w').write(f'#ifndef ProtectedConfig_h\n#define ProtectedConfig_h\n#define FMCORE_TEXT_SHA256_A @\"{d[0][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_A @\"{d[0][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_A @\"{d[0][\"section_sha256\"]}\"\n#define FMCORE_TEXT_SHA256_B @\"{d[1][\"text_sha256\"]}\"\n#define FMCORE_EXPORT_SHA256_B @\"{d[1][\"export_sha256\"]}\"\n#define FMCORE_SECTION_SHA256_B @\"{d[1][\"section_sha256\"]}\"\n#endif\n')"
+          cat << 'EOF' > .build/FFBundleFix.h
+#ifndef FFBundleFix_h
+#define FFBundleFix_h
+#import <Foundation/Foundation.h>
+#ifndef FFBundleIDFreeFireTH_DEFINED
+#define FFBundleIDFreeFireTH_DEFINED
+static NSString *const FFBundleIDFreeFireTH __attribute__((unused)) = @"com.dts.freefireth";
+static NSString *const FFBundleIDFreeFire __attribute__((unused)) = @"com.dts.freefireth";
+static NSString *const FFBundleIDFreeFireVN __attribute__((unused)) = @"com.dts.freefirevn";
+static NSString *const FFBundleIDFreeFireTW __attribute__((unused)) = @"com.dts.freefiretw";
+static NSString *const FFBundleIDFreeFireGlobal __attribute__((unused)) = @"com.dts.freefireth";
+static NSString *const FFBundleIDFreeFireID __attribute__((unused)) = @"com.dts.freefireth";
+static NSString *const FFHologramShaderFilename __attribute__((unused)) = @"shaders.HPt9DZviTSXL9hpGW9QNOMigNLA~3D";
+static NSString *const FFThreeDShaderFilename __attribute__((unused)) = @"optionalavatarres_commonab_shader";
+static NSString *const FFHologramStateKey __attribute__((unused)) = @"FMHologramPersistentState";
+static inline NSString *FFAPIBaseURL(void) { return @""; }
+static NSString *const FFOwnerTelegram __attribute__((unused)) = @"@MYZO_PANEL";
+static inline BOOL FFBrandIdentityIsValid(void) { return YES; }
+#endif
+#endif
+EOF
 
       - name: Patch main.m with Anti-Crack & Video Banner
         env:
@@ -136,7 +149,7 @@ jobs:
           for p in targets:
               try:
                   with open(p, 'r', encoding='utf-8', errors='ignore') as f: code = f.read()
-                  if not re.search(r'\bstatic\s+NSString\s*\*const\s+FFBundleIDFreeFireTH\b', code):
+                  if 'FFBundleIDFreeFireTH' not in code:
                       if 'FFBundleIDFreeFireMAX' in code:
                           code = re.sub(r'(\bstatic\s+NSString\s*\*const\s+FFBundleIDFreeFireMAX\s*=\s*@[^;]+;)', rf'{bundle_defs}\1', code, count=1)
                       else:
@@ -156,7 +169,7 @@ jobs:
           set -e
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "Using Apple SDK: $IOS_SDK"
-          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -framework CoreMedia -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
+          clang -arch arm64 -target arm64-apple-ios15.0 -isysroot "$IOS_SDK" -fobjc-arc -Os -fstack-protector-strong -fvisibility=hidden -fomit-frame-pointer -fno-ident -Wno-deprecated-declarations -DFM_OFFLINE_BUILD=1 -DFM_RELEASE_BUILD=1 -DFM_REQUIRE_SIGNED_RESPONSES=1 -I.build -include .build/FFBundleFix.h "$APP_DIR/main.m" -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework Security -framework UniformTypeIdentifiers -framework AVFoundation -framework AVKit -framework CoreMedia -lobjc -lSystem -dead_strip -Xlinker -adhoc_codesign -o .build/Payload/fougoexternal.app/fougoexternal
           strip -x .build/Payload/fougoexternal.app/fougoexternal 2>/dev/null || true
 
       - name: Bundle Assets and Video Banner
@@ -165,6 +178,7 @@ jobs:
           cp "$APP_DIR/Info.plist" .build/Payload/fougoexternal.app/Info.plist
           sed -i '' 's/NovaBody/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || sed -i 's/NovaBody/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || true
           sed -i '' 's/FOUGO EXYERNAL/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || sed -i 's/FOUGO EXYERNAL/FOUGO EXTERNAL/g' .build/Payload/fougoexternal.app/Info.plist 2>/dev/null || true
+          # Ensure CFBundleSupportedPlatforms exists and Bundle ID is com.apple.mobile.MobileHouseArrest
           python3 -c "
           import plistlib
           p = '.build/Payload/fougoexternal.app/Info.plist'
@@ -235,6 +249,7 @@ jobs:
           cd ..
           shasum -a 256 release/RobotExternal-v100-VIP-Unsigned.ipa > release/RobotExternal-v100-VIP-Unsigned.ipa.sha256
 
+          # Bundle the 100% button-driven Telegram Bot + License API
           python3 -c "
           import os, shutil
           bot_bundled = False
@@ -288,9 +303,12 @@ jobs:
     name: Run Telegram VIP Bot 24/7 (Cloud Runner)
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    concurrency:
+      group: fougo-telegram-bot-runner
+      cancel-in-progress: true
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -300,46 +318,97 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Bot Requirements
+      - name: Install Bot Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install python-telegram-bot fastapi uvicorn python-dotenv httpx
 
-      - name: Configure Git for Persistent License Database
+      - name: Configure Git Identity for Database Auto-Sync
         run: |
-          git config --global user.name "GitHub Actions Bot Runner"
-          git config --global user.email "actions@github.com"
+          git config --global user.name "FOUGO Bot Runner"
+          git config --global user.email "bot@fougo.internal"
 
-      - name: Launch FOUGO VIP Telegram Bot
+      - name: Launch Telegram Bot & Keep Active with Auto-Sync
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN || '9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc' }}
-          OWNER_IDS: ${{ secrets.OWNER_IDS || '8245269289' }}
+          BOT_TOKEN: ${{ github.event.inputs.bot_token || secrets.BOT_TOKEN || '9029335335:AAHTc1Ui-hTfZbBkijk_GPoZKnCdqPvQ6Fc' }}
+          OWNER_IDS: ${{ github.event.inputs.owner_id || secrets.OWNER_IDS || '8245269289' }}
           API_SECRET: FOUGO_VIP_SECRET_9973
           DB_PATH: telegram_bot_panel/data/myzo.db
         run: |
           set -e
           mkdir -p telegram_bot_panel/data
-          BOT_SCRIPT="telegram_bot_panel/bot/bot.py"
-          if [ ! -f "$BOT_SCRIPT" ]; then
-            BOT_SCRIPT=$(find . -name "bot.py" | head -n 1)
-          fi
-          python3 "$BOT_SCRIPT" &
-          BOT_PID=$!
-          echo "VIP Telegram Bot running under PID: $BOT_PID"
 
-          for i in {1..34}; do
+          # Launch Telegram Bot Runner
+          RUNNER_SCRIPT=""
+          if [ -f "telegram_bot_panel/standalone_runner.py" ]; then
+            RUNNER_SCRIPT="telegram_bot_panel/standalone_runner.py"
+          else
+            RUNNER_SCRIPT=$(find . -name "standalone_runner.py" | head -n 1)
+          fi
+
+          if [ -z "$RUNNER_SCRIPT" ]; then
+            for z in $(find . -name "*.zip"); do
+              if unzip -l "$z" 2>/dev/null | grep -q "standalone_runner.py"; then
+                mkdir -p telegram_bot_panel
+                unzip -q -o "$z" -d telegram_bot_panel
+                RUNNER_SCRIPT="telegram_bot_panel/standalone_runner.py"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$RUNNER_SCRIPT" ] || [ ! -f "$RUNNER_SCRIPT" ]; then
+            if [ -f "telegram_bot_panel/bot/bot.py" ]; then
+              RUNNER_SCRIPT="telegram_bot_panel/bot/bot.py"
+            else
+              RUNNER_SCRIPT=$(find . -name "bot.py" | head -n 1)
+            fi
+          fi
+
+          if [ -z "$RUNNER_SCRIPT" ] || [ ! -f "$RUNNER_SCRIPT" ]; then
+            echo "::error::Could not find standalone_runner.py or bot.py in repository!"
+            exit 1
+          fi
+
+          echo "[✓] Launching Telegram Bot from: $RUNNER_SCRIPT"
+          PYTHONUNBUFFERED=1 python3 "$RUNNER_SCRIPT" &
+          BOT_PID=$!
+          echo "Bot successfully running with PID: $BOT_PID"
+          sleep 3
+          if ! kill -0 $BOT_PID 2>/dev/null; then
+            echo "::error::Bot process died immediately upon startup! Check your BOT_TOKEN secret."
+            exit 1
+          fi
+
+          # Run for ~310 minutes (~5.1 hours), committing database changes every 10 minutes
+          for i in {1..31}; do
             sleep 600
             if ! kill -0 $BOT_PID 2>/dev/null; then
-              echo "Bot process unexpectedly stopped! Restarting..."
-              python3 "$BOT_SCRIPT" &
-              BOT_PID=$!
+              echo "Error: Bot process terminated unexpectedly!"
+              exit 1
             fi
-            if git status --porcelain | grep -q "myzo.db"; then
-              git add telegram_bot_panel/data/myzo.db || true
-              git commit -m "Auto-backup VIP license database [skip ci]" || true
-              git push origin HEAD || true
-              echo "License database backed up at minute $((i*10))"
+
+            # Auto-save database to GitHub if modified
+            if [ -f "telegram_bot_panel/data/myzo.db" ]; then
+              git add telegram_bot_panel/data/myzo.db
+              if ! git diff --cached --quiet; then
+                echo "[✓] Auto-saving database to GitHub repository..."
+                git commit -m "Auto-backup license database [skip ci]" || true
+                git push origin HEAD || true
+              fi
             fi
           done
-          kill $BOT_PID 2>/dev/null || true
-          echo "Keep-alive interval reached. Handing over cleanly to next run."
+
+          # Graceful shutdown before runner timeout
+          echo "Cycle completed. Gracefully restarting bot..."
+          kill -SIGTERM $BOT_PID 2>/dev/null || true
+          wait $BOT_PID 2>/dev/null || true
+
+          if [ -f "telegram_bot_panel/data/myzo.db" ]; then
+            git add telegram_bot_panel/data/myzo.db
+            if ! git diff --cached --quiet; then
+              git commit -m "Final sync license database before restart [skip ci]" || true
+              git push origin HEAD || true
+            fi
+          fi
+          echo "Bot cycle finished cleanly. Next scheduled run will resume seamlessly."
